@@ -185,11 +185,12 @@ class VirtualFileSystem {
 - [ ] **WebSocket Server Setup**: Create basic Node.js WebSocket server that can handle client connections
 - [ ] **VSCode Extension Context Adapter**: Create minimal adapter that replaces `vscode.ExtensionContext` with in-memory state
 - [ ] **Task Creation Adapter**: Adapt [`ClineProvider.createTask()`](src/core/webview/ClineProvider.ts:632) to work without VSCode dependencies
-- [ ] **API Handler Integration**: Port [`buildApiHandler()`](src/api/index.ts:97) to work in web environment
-- [ ] **Message Streaming**: Implement streaming of LLM responses from server to web client
-- [ ] **Basic React Chat UI**: Simple chat interface that connects to WebSocket server
-- [ ] **State Management**: In-memory state management for conversation history
-- [ ] **Tool Execution Framework**: Basic framework for tool execution (start with read-only tools)
+- [ ] **API Handler Integration**: Keep [`buildApiHandler()`](src/api/index.ts:97) running in Node.js server context (no changes needed)
+- [ ] **Message Streaming**: Implement streaming of LLM responses from Node.js server to React client via WebSocket
+- [ ] **Basic React Chat UI**: Simple "dumb" chat interface that only handles UI rendering and user input
+- [ ] **Server-Side State Management**: In-memory conversation history and task state managed in Node.js server
+- [ ] **Tool Execution Framework**: Basic framework for tool execution in Node.js server (start with read-only tools)
+- [ ] **WebSocket Message Protocol**: Implement discriminated union message types for type-safe communication
 
 #### POC Success Criteria:
 - [ ] User can start a conversation with the agent through web interface
