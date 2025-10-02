@@ -178,6 +178,26 @@ class VirtualFileSystem {
 
 ## Development Phases
 
+### POC Phase: Basic Agent Conversation
+**Goal**: Minimal working prototype that demonstrates core agent conversation functionality
+
+#### Core Work Required for POC:
+- [ ] **WebSocket Server Setup**: Create basic Node.js WebSocket server that can handle client connections
+- [ ] **VSCode Extension Context Adapter**: Create minimal adapter that replaces `vscode.ExtensionContext` with in-memory state
+- [ ] **Task Creation Adapter**: Adapt [`ClineProvider.createTask()`](src/core/webview/ClineProvider.ts:632) to work without VSCode dependencies
+- [ ] **API Handler Integration**: Port [`buildApiHandler()`](src/api/index.ts:97) to work in web environment
+- [ ] **Message Streaming**: Implement streaming of LLM responses from server to web client
+- [ ] **Basic React Chat UI**: Simple chat interface that connects to WebSocket server
+- [ ] **State Management**: In-memory state management for conversation history
+- [ ] **Tool Execution Framework**: Basic framework for tool execution (start with read-only tools)
+
+#### POC Success Criteria:
+- [ ] User can start a conversation with the agent through web interface
+- [ ] Agent can respond using LLM API (Anthropic/OpenAI)
+- [ ] Basic tool execution works (e.g., `list_files`, `read_file`)
+- [ ] Conversation history is maintained during session
+- [ ] WebSocket communication is stable and handles reconnection
+
 ### Phase 1: Core Infrastructure
 - [ ] Set up fork repository structure
 - [ ] Create basic WebSocket server
