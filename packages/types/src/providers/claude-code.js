@@ -1,0 +1,97 @@
+"use strict"
+Object.defineProperty(exports, "__esModule", { value: true })
+exports.claudeCodeModels = exports.CLAUDE_CODE_DEFAULT_MAX_OUTPUT_TOKENS = exports.claudeCodeDefaultModelId = void 0
+exports.convertModelNameForVertex = convertModelNameForVertex
+exports.getClaudeCodeModelId = getClaudeCodeModelId
+const anthropic_js_1 = require("./anthropic.js")
+// Regex pattern to match 8-digit date at the end of model names
+const VERTEX_DATE_PATTERN = /-(\d{8})$/
+/**
+ * Converts Claude model names from hyphen-date format to Vertex AI's @-date format.
+ *
+ * @param modelName - The original model name (e.g., "claude-sonnet-4-20250514")
+ * @returns The converted model name for Vertex AI (e.g., "claude-sonnet-4@20250514")
+ *
+ * @example
+ * convertModelNameForVertex("claude-sonnet-4-20250514") // returns "claude-sonnet-4@20250514"
+ * convertModelNameForVertex("claude-model") // returns "claude-model" (no change)
+ */
+function convertModelNameForVertex(modelName) {
+	// Convert hyphen-date format to @date format for Vertex AI
+	return modelName.replace(VERTEX_DATE_PATTERN, "@$1")
+}
+exports.claudeCodeDefaultModelId = "claude-sonnet-4-20250514"
+exports.CLAUDE_CODE_DEFAULT_MAX_OUTPUT_TOKENS = 16000
+/**
+ * Gets the appropriate model ID based on whether Vertex AI is being used.
+ *
+ * @param baseModelId - The base Claude Code model ID
+ * @param useVertex - Whether to format the model ID for Vertex AI (default: false)
+ * @returns The model ID, potentially formatted for Vertex AI
+ *
+ * @example
+ * getClaudeCodeModelId("claude-sonnet-4-20250514", true) // returns "claude-sonnet-4@20250514"
+ * getClaudeCodeModelId("claude-sonnet-4-20250514", false) // returns "claude-sonnet-4-20250514"
+ */
+function getClaudeCodeModelId(baseModelId, useVertex = false) {
+	return useVertex ? convertModelNameForVertex(baseModelId) : baseModelId
+}
+exports.claudeCodeModels = {
+	"claude-sonnet-4-5": {
+		...anthropic_js_1.anthropicModels["claude-sonnet-4-5"],
+		supportsImages: false,
+		supportsPromptCache: true, // Claude Code does report cache tokens
+		supportsReasoningEffort: false,
+		supportsReasoningBudget: false,
+		requiredReasoningBudget: false,
+	},
+	"claude-sonnet-4-20250514": {
+		...anthropic_js_1.anthropicModels["claude-sonnet-4-20250514"],
+		supportsImages: false,
+		supportsPromptCache: true, // Claude Code does report cache tokens
+		supportsReasoningEffort: false,
+		supportsReasoningBudget: false,
+		requiredReasoningBudget: false,
+	},
+	"claude-opus-4-1-20250805": {
+		...anthropic_js_1.anthropicModels["claude-opus-4-1-20250805"],
+		supportsImages: false,
+		supportsPromptCache: true, // Claude Code does report cache tokens
+		supportsReasoningEffort: false,
+		supportsReasoningBudget: false,
+		requiredReasoningBudget: false,
+	},
+	"claude-opus-4-20250514": {
+		...anthropic_js_1.anthropicModels["claude-opus-4-20250514"],
+		supportsImages: false,
+		supportsPromptCache: true, // Claude Code does report cache tokens
+		supportsReasoningEffort: false,
+		supportsReasoningBudget: false,
+		requiredReasoningBudget: false,
+	},
+	"claude-3-7-sonnet-20250219": {
+		...anthropic_js_1.anthropicModels["claude-3-7-sonnet-20250219"],
+		supportsImages: false,
+		supportsPromptCache: true, // Claude Code does report cache tokens
+		supportsReasoningEffort: false,
+		supportsReasoningBudget: false,
+		requiredReasoningBudget: false,
+	},
+	"claude-3-5-sonnet-20241022": {
+		...anthropic_js_1.anthropicModels["claude-3-5-sonnet-20241022"],
+		supportsImages: false,
+		supportsPromptCache: true, // Claude Code does report cache tokens
+		supportsReasoningEffort: false,
+		supportsReasoningBudget: false,
+		requiredReasoningBudget: false,
+	},
+	"claude-3-5-haiku-20241022": {
+		...anthropic_js_1.anthropicModels["claude-3-5-haiku-20241022"],
+		supportsImages: false,
+		supportsPromptCache: true, // Claude Code does report cache tokens
+		supportsReasoningEffort: false,
+		supportsReasoningBudget: false,
+		requiredReasoningBudget: false,
+	},
+}
+//# sourceMappingURL=claude-code.js.map

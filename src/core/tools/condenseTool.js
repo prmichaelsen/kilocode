@@ -1,0 +1,52 @@
+"use strict"
+Object.defineProperty(exports, "__esModule", { value: true })
+exports.condenseTool = void 0
+const responses_1 = require("../prompts/responses")
+const condense_1 = require("../condense") // kilocode_change
+const condenseTool = async (cline, block, askApproval, handleError, pushToolResult, removeClosingTag) => {
+	const context = block.params.message
+	try {
+		if (block.partial) {
+			await cline.ask("condense", removeClosingTag("message", context), block.partial).catch(() => {})
+			return
+		} else {
+			if (!context) {
+				cline.consecutiveMistakeCount++
+				pushToolResult(await cline.sayAndCreateMissingParamError("condense", "context"))
+				return
+			}
+			cline.consecutiveMistakeCount = 0
+			const { text, images } = await cline.ask("condense", context, false)
+			// If the user provided a response, treat it as feedback
+			if (text || images?.length) {
+				await cline.say("user_feedback", text ?? "", images)
+				pushToolResult(
+					responses_1.formatResponse.toolResult(
+						`The user provided feedback on the condensed conversation summary:\n<feedback>\n${text}\n</feedback>`,
+						images,
+					),
+				)
+			} else {
+				// If no response, the user accepted the condensed version
+				pushToolResult(responses_1.formatResponse.toolResult(responses_1.formatResponse.condense()))
+				const { contextTokens: prevContextTokens } = cline.getTokenUsage()
+				// Use summarizeConversation to create a condensed version of the conversation
+				const summarizedMessages = await (0, condense_1.summarizeConversation)(
+					cline.apiConversationHistory,
+					cline.api,
+					await cline.getSystemPrompt(),
+					"TaskId condenseTool",
+					prevContextTokens,
+				)
+				// Overwrite the apiConversationHistory with the summarized messages
+				await cline.overwriteApiConversationHistory(summarizedMessages.messages)
+			}
+			return
+		}
+	} catch (error) {
+		await handleError("condensing context window", error)
+		return
+	}
+}
+exports.condenseTool = condenseTool
+//# sourceMappingURL=condenseTool.js.map

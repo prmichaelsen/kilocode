@@ -1,0 +1,303 @@
+"use strict"
+var __createBinding =
+	(this && this.__createBinding) ||
+	(Object.create
+		? function (o, m, k, k2) {
+				if (k2 === undefined) k2 = k
+				var desc = Object.getOwnPropertyDescriptor(m, k)
+				if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+					desc = {
+						enumerable: true,
+						get: function () {
+							return m[k]
+						},
+					}
+				}
+				Object.defineProperty(o, k2, desc)
+			}
+		: function (o, m, k, k2) {
+				if (k2 === undefined) k2 = k
+				o[k2] = m[k]
+			})
+var __setModuleDefault =
+	(this && this.__setModuleDefault) ||
+	(Object.create
+		? function (o, v) {
+				Object.defineProperty(o, "default", { enumerable: true, value: v })
+			}
+		: function (o, v) {
+				o["default"] = v
+			})
+var __importStar =
+	(this && this.__importStar) ||
+	(function () {
+		var ownKeys = function (o) {
+			ownKeys =
+				Object.getOwnPropertyNames ||
+				function (o) {
+					var ar = []
+					for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k
+					return ar
+				}
+			return ownKeys(o)
+		}
+		return function (mod) {
+			if (mod && mod.__esModule) return mod
+			var result = {}
+			if (mod != null)
+				for (var k = ownKeys(mod), i = 0; i < k.length; i++)
+					if (k[i] !== "default") __createBinding(result, mod, k[i])
+			__setModuleDefault(result, mod)
+			return result
+		}
+	})()
+var __importDefault =
+	(this && this.__importDefault) ||
+	function (mod) {
+		return mod && mod.__esModule ? mod : { default: mod }
+	}
+Object.defineProperty(exports, "__esModule", { value: true })
+exports.loadRooConfiguration = void 0
+exports.getGlobalRooDirectory = getGlobalRooDirectory
+exports.getProjectRooDirectoryForCwd = getProjectRooDirectoryForCwd
+exports.directoryExists = directoryExists
+exports.fileExists = fileExists
+exports.readFileIfExists = readFileIfExists
+exports.getRooDirectoriesForCwd = getRooDirectoriesForCwd
+exports.loadConfiguration = loadConfiguration
+const path = __importStar(require("path"))
+const os = __importStar(require("os"))
+const promises_1 = __importDefault(require("fs/promises"))
+const fs_1 = __importDefault(require("fs")) // kilocode_change
+/**
+ * Gets the global .roo directory path based on the current platform
+ *
+ * @returns The absolute path to the global .roo directory
+ *
+ * @example Platform-specific paths:
+ * ```
+ * // macOS/Linux: ~/.roo/
+ * // Example: /Users/john/.roo
+ *
+ * // Windows: %USERPROFILE%\.roo\
+ * // Example: C:\Users\john\.roo
+ * ```
+ *
+ * @example Usage:
+ * ```typescript
+ * const globalDir = getGlobalRooDirectory()
+ * // Returns: "/Users/john/.roo" (on macOS/Linux)
+ * // Returns: "C:\\Users\\john\\.roo" (on Windows)
+ * ```
+ */
+function getGlobalRooDirectory() {
+	const homeDir = os.homedir()
+	return path.join(homeDir, ".kilocode") // kilocode_change
+}
+/**
+ * Gets the project-local .roo directory path for a given cwd
+ *
+ * @param cwd - Current working directory (project path)
+ * @returns The absolute path to the project-local .roo directory
+ *
+ * @example
+ * ```typescript
+ * const projectDir = getProjectRooDirectoryForCwd('/Users/john/my-project')
+ * // Returns: "/Users/john/my-project/.roo"
+ *
+ * const windowsProjectDir = getProjectRooDirectoryForCwd('C:\\Users\\john\\my-project')
+ * // Returns: "C:\\Users\\john\\my-project\\.roo"
+ * ```
+ *
+ * @example Directory structure:
+ * ```
+ * /Users/john/my-project/
+ * ├── .roo/                    # Project-local configuration directory
+ * │   ├── rules/
+ * │   │   └── rules.md
+ * │   ├── custom-instructions.md
+ * │   └── config/
+ * │       └── settings.json
+ * ├── src/
+ * │   └── index.ts
+ * └── package.json
+ * ```
+ */
+function getProjectRooDirectoryForCwd(cwd) {
+	// kilocode_change start
+	const kiloDir = path.join(cwd, ".kilocode")
+	const rooDir = path.join(cwd, ".roo")
+	if (fs_1.default.existsSync(rooDir) && !fs_1.default.existsSync(kiloDir)) {
+		return rooDir
+	}
+	return kiloDir
+	// kilocode_change end
+}
+/**
+ * Checks if a directory exists
+ */
+async function directoryExists(dirPath) {
+	try {
+		const stat = await promises_1.default.stat(dirPath)
+		return stat.isDirectory()
+	} catch (error) {
+		// Only catch expected "not found" errors
+		if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+			return false
+		}
+		// Re-throw unexpected errors (permission, I/O, etc.)
+		throw error
+	}
+}
+/**
+ * Checks if a file exists
+ */
+async function fileExists(filePath) {
+	try {
+		const stat = await promises_1.default.stat(filePath)
+		return stat.isFile()
+	} catch (error) {
+		// Only catch expected "not found" errors
+		if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+			return false
+		}
+		// Re-throw unexpected errors (permission, I/O, etc.)
+		throw error
+	}
+}
+/**
+ * Reads a file safely, returning null if it doesn't exist
+ */
+async function readFileIfExists(filePath) {
+	try {
+		return await promises_1.default.readFile(filePath, "utf-8")
+	} catch (error) {
+		// Only catch expected "not found" errors
+		if (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "EISDIR") {
+			return null
+		}
+		// Re-throw unexpected errors (permission, I/O, etc.)
+		throw error
+	}
+}
+/**
+ * Gets the ordered list of .roo directories to check (global first, then project-local)
+ *
+ * @param cwd - Current working directory (project path)
+ * @returns Array of directory paths to check in order [global, project-local]
+ *
+ * @example
+ * ```typescript
+ * // For a project at /Users/john/my-project
+ * const directories = getRooDirectoriesForCwd('/Users/john/my-project')
+ * // Returns:
+ * // [
+ * //   '/Users/john/.roo',           // Global directory
+ * //   '/Users/john/my-project/.roo' // Project-local directory
+ * // ]
+ * ```
+ *
+ * @example Directory structure:
+ * ```
+ * /Users/john/
+ * ├── .roo/                    # Global configuration
+ * │   ├── rules/
+ * │   │   └── rules.md
+ * │   └── custom-instructions.md
+ * └── my-project/
+ *     ├── .roo/                # Project-specific configuration
+ *     │   ├── rules/
+ *     │   │   └── rules.md     # Overrides global rules
+ *     │   └── project-notes.md
+ *     └── src/
+ *         └── index.ts
+ * ```
+ */
+function getRooDirectoriesForCwd(cwd) {
+	const directories = []
+	// Add global directory first
+	directories.push(getGlobalRooDirectory())
+	// Add project-local directory second
+	directories.push(getProjectRooDirectoryForCwd(cwd))
+	return directories
+}
+/**
+ * Loads configuration from multiple .roo directories with project overriding global
+ *
+ * @param relativePath - The relative path within each .roo directory (e.g., 'rules/rules.md')
+ * @param cwd - Current working directory (project path)
+ * @returns Object with global and project content, plus merged content
+ *
+ * @example
+ * ```typescript
+ * // Load rules configuration for a project
+ * const config = await loadConfiguration('rules/rules.md', '/Users/john/my-project')
+ *
+ * // Returns:
+ * // {
+ * //   global: "Global rules content...",     // From ~/.roo/rules/rules.md
+ * //   project: "Project rules content...",   // From /Users/john/my-project/.roo/rules/rules.md
+ * //   merged: "Global rules content...\n\n# Project-specific rules (override global):\n\nProject rules content..."
+ * // }
+ * ```
+ *
+ * @example File paths resolved:
+ * ```
+ * relativePath: 'rules/rules.md'
+ * cwd: '/Users/john/my-project'
+ *
+ * Reads from:
+ * - Global: /Users/john/.roo/rules/rules.md
+ * - Project: /Users/john/my-project/.roo/rules/rules.md
+ *
+ * Other common relativePath examples:
+ * - 'custom-instructions.md'
+ * - 'config/settings.json'
+ * - 'templates/component.tsx'
+ * ```
+ *
+ * @example Merging behavior:
+ * ```
+ * // If only global exists:
+ * { global: "content", project: null, merged: "content" }
+ *
+ * // If only project exists:
+ * { global: null, project: "content", merged: "content" }
+ *
+ * // If both exist:
+ * {
+ *   global: "global content",
+ *   project: "project content",
+ *   merged: "global content\n\n# Project-specific rules (override global):\n\nproject content"
+ * }
+ * ```
+ */
+async function loadConfiguration(relativePath, cwd) {
+	const globalDir = getGlobalRooDirectory()
+	const projectDir = getProjectRooDirectoryForCwd(cwd)
+	const globalFilePath = path.join(globalDir, relativePath)
+	const projectFilePath = path.join(projectDir, relativePath)
+	// Read global configuration
+	const globalContent = await readFileIfExists(globalFilePath)
+	// Read project-local configuration
+	const projectContent = await readFileIfExists(projectFilePath)
+	// Merge configurations - project overrides global
+	let merged = ""
+	if (globalContent) {
+		merged += globalContent
+	}
+	if (projectContent) {
+		if (merged) {
+			merged += "\n\n# Project-specific rules (override global):\n\n"
+		}
+		merged += projectContent
+	}
+	return {
+		global: globalContent,
+		project: projectContent,
+		merged: merged || "",
+	}
+}
+// Export with backward compatibility alias
+exports.loadRooConfiguration = loadConfiguration
+//# sourceMappingURL=index.js.map
