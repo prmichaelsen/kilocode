@@ -139,7 +139,7 @@ export default function App() {
 					// Add new message or complete partial message
 					const newMessage: ChatMessage = {
 						id: ts.toString(),
-						content: existingIndex !== -1 ? prev[existingIndex].content + content : content,
+						content: existingIndex !== -1 ? (prev[existingIndex]?.content ?? "") + content : content, // kilocode_change
 						type: messageType === "ask" ? "assistant" : "assistant",
 						timestamp: ts,
 						partial,

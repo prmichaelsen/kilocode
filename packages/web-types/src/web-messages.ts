@@ -151,6 +151,10 @@ export function isErrorMessage(msg: WebSocketMessage): msg is ErrorMessage {
 	return msg.type === "error"
 }
 
+export function isConnectionStatusMessage(msg: WebSocketMessage): msg is ConnectionStatusMessage {
+	return msg.type === "connection_status"
+}
+
 // Message creation helpers
 export function createErrorMessage(message: string, code?: string, requestId?: string): ErrorMessage {
 	return {
