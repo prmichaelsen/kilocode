@@ -4,6 +4,7 @@ import { getReadFileDescription } from './tools/read-file.js'
 import { getWriteToFileDescription } from './tools/write-to-file.js'
 import { getListFilesDescription } from './tools/list-files.js'
 import { getAttemptCompletionDescription } from './tools/attempt-completion.js'
+import { getSearchAndReplaceDescription } from './tools/search-and-replace.js'
 
 interface ToolArgs {
 	cwd: string
@@ -49,6 +50,8 @@ Always use the actual tool name as the XML tag name for proper parsing and execu
 	const toolDescriptions = `# Tools
 
 ${getExecuteCommandDescription(toolArgs)}
+
+${getSearchAndReplaceDescription(toolArgs)}
 
 ${getReadFileDescription(toolArgs)}
 

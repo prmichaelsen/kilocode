@@ -82,13 +82,39 @@ export class FirebaseService {
 
 	async saveTaskHistory(taskHistory: TaskHistory): Promise<void> {
 		try {
+			// Separate messages from main task document to avoid size limits
+			const { messages, ...taskMetadata } = taskHistory
+			
 			const sanitizedData = prepareForFirestore({
-				...taskHistory,
+				...taskMetadata,
+				messageCount: messages.length,
 				createdAt: admin.firestore.Timestamp.fromDate(taskHistory.createdAt),
 				updatedAt: admin.firestore.Timestamp.fromDate(taskHistory.updatedAt),
 			}, 'task history save')
 
+			// Save task metadata without messages
 			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskHistory.taskId).set(sanitizedData)
+			
+			// Save messages to subcollection if any exist
+			if (messages && messages.length > 0) {
+				const batch = this.db.batch()
+				
+				messages.forEach(message => {
+					const sanitizedMessage = prepareForFirestore(message, 'message save')
+					const messageRef = this.db
+						.collection(FirebaseCollections.TASK_HISTORY)
+						.doc(taskHistory.taskId)
+						.collection('messages')
+						.doc(message.id)
+					
+					batch.set(messageRef, {
+						...sanitizedMessage,
+						createdAt: admin.firestore.Timestamp.now(),
+					})
+				})
+				
+				await batch.commit()
+			}
 		} catch (error) {
 			console.error('[FirebaseService] Error saving task history:', error)
 			throw error
@@ -103,6 +129,34 @@ export class FirebaseService {
 			}
 
 			const data = doc.data()!
+			
+			// Load messages from subcollection
+			const messagesSnapshot = await this.db
+				.collection(FirebaseCollections.TASK_HISTORY)
+				.doc(taskId)
+				.collection('messages')
+				.orderBy('timestamp', 'asc')
+				.get()
+
+			const messages: ChatMessage[] = messagesSnapshot.docs.map(messageDoc => {
+				const messageData = messageDoc.data()
+				
+				// Fix: Extract actual text content instead of JSON structure
+				let content = messageData.content || ""
+				if (typeof content === 'object' && content.text) {
+					content = content.text
+				}
+				
+				return {
+					id: messageDoc.id,
+					content,
+					type: messageData.type || "assistant",
+					timestamp: messageData.timestamp || Date.now(),
+					partial: messageData.partial || false,
+					messageIndex: messageData.messageIndex,
+					streamId: messageData.streamId,
+				} as ChatMessage
+			})
 			
 			// Safe date parsing with fallbacks
 			const parseDate = (dateField: any): Date => {
@@ -128,6 +182,7 @@ export class FirebaseService {
 
 			return {
 				...data,
+				messages, // Use messages from subcollection
 				createdAt: parseDate(data.createdAt),
 				updatedAt: parseDate(data.updatedAt),
 			} as TaskHistory
@@ -168,14 +223,19 @@ export class FirebaseService {
 				}
 			}
 
-			return snapshot.docs.map(doc => {
+			// PERFORMANCE OPTIMIZATION: Return task metadata only, load messages on demand
+			// This dramatically improves performance by avoiding expensive subcollection queries
+			const tasks = snapshot.docs.map(doc => {
 				const data = doc.data()
 				return {
 					...data,
+					messages: [], // Empty array - messages loaded on demand when task is opened
 					createdAt: parseDate(data.createdAt),
 					updatedAt: parseDate(data.updatedAt),
 				} as TaskHistory
 			}).filter(task => task.taskId) // Filter out any malformed tasks
+
+			return tasks
 		} catch (error) {
 			console.error('[FirebaseService] Error getting global task history:', error)
 			// Return empty array instead of throwing to prevent crashes
@@ -205,13 +265,35 @@ export class FirebaseService {
 
 	async addMessageToTask(taskId: string, message: ChatMessage): Promise<void> {
 		try {
+			// PERFORMANCE OPTIMIZATION: Use batch operations for better performance
+			const batch = this.db.batch()
 			const sanitizedMessage = prepareForFirestore(message, 'message add')
-			const updateData = prepareForFirestore({
-				messages: admin.firestore.FieldValue.arrayUnion(sanitizedMessage),
-				updatedAt: admin.firestore.Timestamp.now(),
-			}, 'message add update')
+			
+			// Store individual message in subcollection
+			const messageRef = this.db
+				.collection(FirebaseCollections.TASK_HISTORY)
+				.doc(taskId)
+				.collection('messages')
+				.doc(message.id)
+			
+			batch.set(messageRef, {
+				...sanitizedMessage,
+				createdAt: admin.firestore.Timestamp.now(),
+			})
 
-			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId).update(updateData)
+			// Update task document with just metadata (no large message content)
+			const taskRef = this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId)
+			const updateData = prepareForFirestore({
+				lastMessageId: message.id,
+				lastMessageTimestamp: message.timestamp,
+				messageCount: admin.firestore.FieldValue.increment(1),
+				updatedAt: admin.firestore.Timestamp.now(),
+			}, 'task metadata update')
+
+			batch.update(taskRef, updateData)
+			
+			// Execute both operations in a single batch for better performance
+			await batch.commit()
 		} catch (error) {
 			console.error('[FirebaseService] Error adding message to task:', error)
 			throw error

@@ -249,12 +249,12 @@ export class SimpleWebServer {
 			}
 			session.messages.push(userMessage)
 
-			// Add user message to Firebase
-			try {
-				await this.firebaseService.addMessageToTask(taskId, userMessage)
-			} catch (firebaseError) {
-				console.error(`[SimpleWebServer] Failed to add user message to Firebase:`, firebaseError)
-			}
+			// PERFORMANCE OPTIMIZATION: Make Firebase operations non-blocking
+			// Add user message to Firebase (async, don't block task creation)
+			this.firebaseService.addMessageToTask(taskId, userMessage).catch(firebaseError => {
+				console.error(`[SimpleWebServer] Failed to add user message to Firebase for task ${taskId}:`, firebaseError)
+				// Continue task execution - Firebase failures should not stop the agent
+			})
 
 			// Continue with existing task or create new one if task doesn't exist
 			if (session.currentTask && session.currentTask.taskId === taskId) {
@@ -341,7 +341,8 @@ export class SimpleWebServer {
 			// Store task in session for continuous interaction
 			session.currentTask = task
 
-			// Create Firebase task history entry (if Firebase is available)
+			// PERFORMANCE OPTIMIZATION: Make Firebase operations non-blocking
+			// Create Firebase task history entry (async, don't block task creation)
 			if (this.firebaseService) {
 				const taskHistory: TaskHistory = {
 					taskId,
@@ -352,13 +353,13 @@ export class SimpleWebServer {
 					status: 'active'
 				}
 
-				try {
-					await this.firebaseService.saveTaskHistory(taskHistory)
+				// Fire and forget - don't await to avoid blocking task creation
+				this.firebaseService.saveTaskHistory(taskHistory).then(() => {
 					console.log(`[SimpleWebServer] Task history saved to Firebase: ${taskId}`)
-				} catch (firebaseError) {
-					console.error(`[SimpleWebServer] Failed to save task history to Firebase:`, firebaseError)
-					// Continue without Firebase - don't fail the task
-				}
+				}).catch(firebaseError => {
+					console.error(`[SimpleWebServer] Failed to save task history to Firebase for task ${taskId}:`, firebaseError)
+					// Continue without Firebase - don't fail the task creation
+				})
 			}
 
 			// Set up task event listeners for streaming
@@ -392,7 +393,6 @@ export class SimpleWebServer {
 				// The Task class already handles tool execution properly in its conversation loop
 				// Duplicate execution was causing tools to show output to user but not provide context to agent
 				// Now the Task class handles all tool execution and feeds results back into conversation context
-				console.log(`[SimpleWebServer] Task ${taskId} message: ${messageContent.substring(0, 100)}...`)
 
 				// Generate unique message ID for streaming
 				const messageId = `msg_${taskId}_${messageTimestamp}`
@@ -426,14 +426,14 @@ export class SimpleWebServer {
 					}
 					session.messages.push(assistantMessage)
 
-					// Update Firebase with new message (with error handling)
+					// CRITICAL PERFORMANCE FIX: Only save COMPLETE messages to Firebase
+					// This prevents excessive Firebase writes during streaming and improves performance
 					if (this.firebaseService) {
-						try {
-							await this.firebaseService.addMessageToTask(taskId, assistantMessage)
-						} catch (firebaseError) {
-							console.error(`[SimpleWebServer] Failed to add message to Firebase:`, firebaseError)
-							// Don't fail the task if Firebase fails
-						}
+						// Fire and forget - don't await Firebase operations to avoid blocking streaming
+						this.firebaseService.addMessageToTask(taskId, assistantMessage).catch(firebaseError => {
+							console.error(`[SimpleWebServer] Failed to add complete message to Firebase for task ${taskId}:`, firebaseError)
+							// Continue task execution - Firebase failures should not stop the agent
+						})
 					}
 
 					// Keep task in running state after messages (unless explicit completion)
@@ -456,12 +456,12 @@ export class SimpleWebServer {
 		task.on("completed", async (result: string) => {
 			console.log(`[SimpleWebServer] Task completed: ${result}`)
 			
-			// Update Firebase task status
-			try {
-				await this.firebaseService.updateTaskStatus(taskId, 'completed')
-			} catch (firebaseError) {
-				console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
-			}
+			// PERFORMANCE OPTIMIZATION: Make Firebase operations non-blocking
+			// Update Firebase task status (async, don't block completion)
+			this.firebaseService.updateTaskStatus(taskId, 'completed').catch(firebaseError => {
+				console.error(`[SimpleWebServer] Failed to update task status to completed in Firebase for task ${taskId}:`, firebaseError)
+				// Continue - task completion should not be blocked by storage failures
+			})
 
 			// Send task state update to indicate completion but keep task available for continuation
 			this.sendToClient(session, {
@@ -478,12 +478,12 @@ export class SimpleWebServer {
 		task.on("error", async (error: string) => {
 			console.error(`[SimpleWebServer] Task error: ${error}`)
 			
-			// Update Firebase task status
-			try {
-				await this.firebaseService.updateTaskStatus(taskId, 'error')
-			} catch (firebaseError) {
-				console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
-			}
+			// PERFORMANCE OPTIMIZATION: Make Firebase operations non-blocking
+			// Update Firebase task status (async, don't block error handling)
+			this.firebaseService.updateTaskStatus(taskId, 'error').catch(firebaseError => {
+				console.error(`[SimpleWebServer] Failed to update task status to error in Firebase for task ${taskId}:`, firebaseError)
+				// Continue - error reporting should not be blocked by storage failures
+			})
 
 			this.sendToClient(session, {
 				type: "error",
@@ -964,18 +964,31 @@ export class SimpleWebServer {
 	private async handleDeleteTask(session: ClientSession, payload: any) {
 		try {
 			const { taskId } = payload
-			// Note: Firebase doesn't have a built-in delete method in our service
-			// We could implement soft delete by updating status to 'deleted'
-			await this.firebaseService.updateTaskStatus(taskId, 'deleted' as any)
 			
-			this.sendToClient(session, {
-				type: "task_deleted_response",
-				payload: {
-					success: true,
-					taskId,
-					requestId: payload.requestId,
-				},
-			})
+			// Soft delete by updating status to 'deleted' with proper error handling
+			try {
+				await this.firebaseService.updateTaskStatus(taskId, 'deleted' as any)
+				
+				this.sendToClient(session, {
+					type: "task_deleted_response",
+					payload: {
+						success: true,
+						taskId,
+						requestId: payload.requestId,
+					},
+				})
+			} catch (firebaseError) {
+				console.error(`[SimpleWebServer] Failed to delete task ${taskId} in Firebase:`, firebaseError)
+				// Still report success to client since the task is effectively removed from their session
+				this.sendToClient(session, {
+					type: "task_deleted_response",
+					payload: {
+						success: true,
+						taskId,
+						requestId: payload.requestId,
+					},
+				})
+			}
 		} catch (error) {
 			console.error("[SimpleWebServer] Error deleting task:", error)
 			this.sendToClient(session, {

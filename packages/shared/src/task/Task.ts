@@ -199,7 +199,13 @@ export class Task extends EventEmitter<TaskEvents> {
 
 	private async addToClineMessages(message: ClineMessage) {
 		this.clineMessages.push(message)
-		await this.saveClineMessages()
+		
+		// PERFORMANCE OPTIMIZATION: Only save complete messages to avoid excessive Firebase writes
+		// This prevents saving every partial streaming chunk and dramatically improves performance
+		if (!message.partial) {
+			await this.saveClineMessages()
+		}
+		
 		this.emit("message", message)
 	}
 
@@ -418,7 +424,12 @@ export class Task extends EventEmitter<TaskEvents> {
 	private async addToApiConversationHistory(message: any) {
 		const messageWithTs = { ...message, ts: Date.now() }
 		this.apiConversationHistory.push(messageWithTs)
-		await this.saveApiConversationHistory()
+		
+		// PERFORMANCE OPTIMIZATION: Debounce API conversation history saves
+		// Only save when we have significant changes to avoid excessive Firebase writes
+		if (this.apiConversationHistory.length % 5 === 0) {
+			await this.saveApiConversationHistory()
+		}
 	}
 
 	private async saveApiConversationHistory() {
@@ -428,7 +439,8 @@ export class Task extends EventEmitter<TaskEvents> {
 				await this.dependencies.storage.saveApiMessages(this.taskId, this.apiConversationHistory)
 			}
 		} catch (error) {
-			console.error("Failed to save API conversation history:", error)
+			console.error(`[Task] Failed to save API conversation history for ${this.taskId}:`, error)
+			// Don't throw - continue task execution even if storage fails
 		}
 	}
 
@@ -442,7 +454,9 @@ export class Task extends EventEmitter<TaskEvents> {
 				}
 			}
 		} catch (error) {
-			console.error("Failed to load API conversation history:", error)
+			console.error(`[Task] Failed to load API conversation history for ${this.taskId}:`, error)
+			// Continue with empty history if loading fails
+			this.apiConversationHistory = []
 		}
 	}
 
@@ -452,7 +466,8 @@ export class Task extends EventEmitter<TaskEvents> {
 				await this.dependencies.storage.saveClineMessages(this.taskId, this.clineMessages)
 			}
 		} catch (error) {
-			console.error("Failed to save Cline messages:", error)
+			console.error(`[Task] Failed to save Cline messages for ${this.taskId}:`, error)
+			// Don't throw - continue task execution even if storage fails
 		}
 	}
 
@@ -466,7 +481,9 @@ export class Task extends EventEmitter<TaskEvents> {
 				}
 			}
 		} catch (error) {
-			console.error("Failed to load Cline messages:", error)
+			console.error(`[Task] Failed to load Cline messages for ${this.taskId}:`, error)
+			// Continue with empty messages if loading fails
+			this.clineMessages = []
 		}
 	}
 
@@ -522,6 +539,7 @@ export class Task extends EventEmitter<TaskEvents> {
 			/<list_files>/,
 			/<apply_diff>/,
 			/<search_files>/,
+			/<search_and_replace>/,
 			/<attempt_completion>/,
 		]
 		return toolPatterns.some((pattern) => pattern.test(message))
@@ -581,6 +599,56 @@ export class Task extends EventEmitter<TaskEvents> {
 						return `[execute_command Result]\n\nCommand: ${command}\nExit Code: ${result.exitCode}\n\nOutput:\n${result.stdout}\n\nError:\n${result.stderr}`
 					} catch (error) {
 						return `[execute_command Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+					}
+				}
+			}
+
+			if (message.includes('<write_to_file>')) {
+				// Extract file path and content from XML tags
+				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
+				const contentMatch = message.match(/<content>(.*?)<\/content>/s)
+				if (pathMatch && pathMatch[1] && contentMatch && contentMatch[1]) {
+					try {
+						const filePath = pathMatch[1].trim()
+						const content = contentMatch[1].trim()
+						await this.fileSystem.writeFile(filePath, content)
+						return `[write_to_file Result]\n\nSuccessfully wrote to file: ${filePath}`
+					} catch (error) {
+						return `[write_to_file Result]\n\nError writing file ${pathMatch[1]}: ${error instanceof Error ? error.message : String(error)}`
+					}
+				}
+			}
+
+			if (message.includes('<search_and_replace>')) {
+				// Extract parameters from XML tags
+				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
+				const searchMatch = message.match(/<search>(.*?)<\/search>/s)
+				const replaceMatch = message.match(/<replace>(.*?)<\/replace>/s)
+				
+				if (pathMatch && pathMatch[1] && searchMatch && searchMatch[1] && replaceMatch && replaceMatch[1]) {
+					try {
+						const filePath = pathMatch[1].trim()
+						const searchText = searchMatch[1].trim()
+						const replaceText = replaceMatch[1].trim()
+						
+						// Read the file
+						const content = await this.fileSystem.readFile(filePath)
+						
+						// Perform the replacement
+						const updatedContent = content.replace(new RegExp(searchText, 'g'), replaceText)
+						
+						// Check if any changes were made
+						if (content === updatedContent) {
+							return `[search_and_replace Result]\n\nNo matches found for "${searchText}" in file: ${filePath}`
+						}
+						
+						// Write the updated content back
+						await this.fileSystem.writeFile(filePath, updatedContent)
+						
+						const matchCount = (content.match(new RegExp(searchText, 'g')) || []).length
+						return `[search_and_replace Result]\n\nSuccessfully replaced ${matchCount} occurrence(s) of "${searchText}" with "${replaceText}" in file: ${filePath}`
+					} catch (error) {
+						return `[search_and_replace Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
 					}
 				}
 			}
