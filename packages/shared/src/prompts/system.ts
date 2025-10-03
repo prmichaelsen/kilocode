@@ -6,17 +6,27 @@ import { getListFilesDescription } from './tools/list-files.js'
 import { getAttemptCompletionDescription } from './tools/attempt-completion.js'
 import { getSearchAndReplaceDescription } from './tools/search-and-replace.js'
 import { getChangeWorkingDirectoryDescription } from './tools/change-working-directory.js'
+import { getUseMcpToolDescription, getAccessMcpResourceDescription } from './tools/index'
+import { getMcpServersSection } from './sections/mcp-servers.js'
+import { McpHub } from '../services/mcp/McpHub.js'
+import { DiffStrategy } from '../shared/tools.js'
 
 interface ToolArgs {
 	cwd: string
 	supportsComputerUse: boolean
 	partialReadsEnabled?: boolean
+	mcpHub?: McpHub
 	settings?: {
 		maxConcurrentFileReads?: number
 	}
 }
 
-export function generateWebSystemPrompt(workspacePath: string): string {
+export async function generateWebSystemPrompt(
+	workspacePath: string,
+	mcpHub?: McpHub,
+	diffStrategy?: DiffStrategy,
+	enableMcpServerCreation?: boolean
+): Promise<string> {
 	const roleDefinition = "You are Kilo Code, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices."
 	
 	const toolUseSection = `====
@@ -47,6 +57,16 @@ Always use the actual tool name as the XML tag name for proper parsing and execu
 		}
 	}
 
+	// Check if MCP functionality should be included
+	const hasMcpServers = mcpHub && mcpHub.getServers().length > 0
+	const shouldIncludeMcp = hasMcpServers
+
+	// Generate MCP tool descriptions if available
+	const mcpToolDescriptions = shouldIncludeMcp ? [
+		getUseMcpToolDescription({ ...toolArgs, mcpHub }),
+		getAccessMcpResourceDescription({ ...toolArgs, mcpHub })
+	].filter(Boolean).join('\n\n') : ''
+
 	// Generate tool descriptions using the existing functions
 	const toolDescriptions = `# Tools
 
@@ -62,7 +82,14 @@ ${getWriteToFileDescription(toolArgs)}
 
 ${getListFilesDescription(toolArgs)}
 
+${mcpToolDescriptions ? `\n${mcpToolDescriptions}\n` : ''}
+
 ${getAttemptCompletionDescription(toolArgs)}`
+
+	// Generate MCP servers section if available
+	const mcpServersSection = shouldIncludeMcp
+		? await getMcpServersSection(mcpHub, diffStrategy, enableMcpServerCreation)
+		: ''
 
 	const capabilities = `====
 
@@ -74,7 +101,7 @@ CAPABILITIES
 - You can use the change_working_directory tool to navigate to different directories and change the context for all subsequent operations.
 - You can use the read_file tool to examine the contents of files.
 - You can use the write_to_file tool to create new files or completely rewrite existing files.
-- You can use the list_files tool to see what files and directories are available.`
+- You can use the list_files tool to see what files and directories are available.${shouldIncludeMcp ? '\n- You have access to MCP servers that may provide additional tools and resources to extend your capabilities.' : ''}`
 
 	const objective = `====
 
@@ -89,5 +116,13 @@ You accomplish a given task iteratively, breaking it down into clear steps and w
 
 Always be helpful, accurate, and efficient in your responses.`
 
-	return [roleDefinition, toolUseSection, toolDescriptions, capabilities, objective].join('\n\n')
+	const sections = [roleDefinition, toolUseSection, toolDescriptions]
+	
+	if (mcpServersSection) {
+		sections.push(mcpServersSection)
+	}
+	
+	sections.push(capabilities, objective)
+
+	return sections.join('\n\n')
 }

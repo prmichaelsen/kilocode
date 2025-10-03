@@ -15,6 +15,7 @@ import { FirebaseService, TaskHistory } from "./services/FirebaseService"
 import { NodeTerminalAdapter } from "./adapters/TerminalAdapter"
 import { NodeFileSystemAdapter } from "./adapters/FileSystemAdapter"
 import { FirebaseTaskStorageAdapter } from "./adapters/TaskStorageAdapter"
+import { WebMcpHub } from "./services/WebMcpHub"
 
 export interface ChatMessage {
 	id: string
@@ -59,6 +60,9 @@ export class SimpleWebServer {
 			console.error('[SimpleWebServer] Firebase connection is required for server operation')
 			throw new Error(`FATAL: Firebase initialization failed: ${error}`)
 		}
+
+		// MCP hub will be initialized per task with the correct workspace path
+		console.log('[SimpleWebServer] MCP hub will be initialized per task with workspace-specific configuration')
 	}
 
 	private setupExpress() {
@@ -351,7 +355,8 @@ export class SimpleWebServer {
 			}
 
 			// Create task dependencies for web environment with real adapters
-			const workspacePath = process.env.HOME || "/home/user"
+			// Use the web server directory as workspace so MCP settings can be found
+			const workspacePath = process.cwd()
 			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
 			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
 			const storageAdapter = new FirebaseTaskStorageAdapter()
@@ -367,12 +372,24 @@ export class SimpleWebServer {
 			// Store storage adapter in session for reuse
 			session.storageAdapter = storageAdapter
 
-			// Create Task with orchestration
+			// Initialize MCP hub for this task's workspace
+			let mcpHub: WebMcpHub | undefined
+			try {
+				mcpHub = WebMcpHub.getInstance(workspacePath)
+				console.log(`[SimpleWebServer] MCP hub initialized for workspace: ${workspacePath}`)
+			} catch (error) {
+				console.error('[SimpleWebServer] Warning: Failed to initialize MCP hub:', error)
+				// MCP is optional, continue without it
+			}
+
+			// Create Task with orchestration and MCP support
 			const task = new Task({
 				taskId,
 				apiConfiguration: providerConfig,
 				dependencies,
 				task: userText,
+				mcpHub: mcpHub?.mcpHub,
+				enableMcpServerCreation: true,
 			})
 
 			// Store task in session for continuous interaction
@@ -604,7 +621,8 @@ export class SimpleWebServer {
 			}
 
 			// Create task dependencies with storage adapter
-			const workspacePath = process.env.HOME || "/home/user"
+			// Use the web server directory as workspace so MCP settings can be found
+			const workspacePath = process.cwd()
 			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
 			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
 			const storageAdapter = new FirebaseTaskStorageAdapter()
@@ -617,12 +635,24 @@ export class SimpleWebServer {
 				storage: storageAdapter,
 			}
 
+			// Initialize MCP hub for this task's workspace
+			let mcpHub: WebMcpHub | undefined
+			try {
+				mcpHub = WebMcpHub.getInstance(workspacePath)
+				console.log(`[SimpleWebServer] MCP hub initialized for resumed task workspace: ${workspacePath}`)
+			} catch (error) {
+				console.error('[SimpleWebServer] Warning: Failed to initialize MCP hub for resumed task:', error)
+				// MCP is optional, continue without it
+			}
+
 			// Create Task instance with existing taskId to load conversation history
 			const task = new Task({
 				taskId: taskHistory.taskId,
 				apiConfiguration: providerConfig,
 				dependencies,
 				// Don't provide task text - we're resuming, not starting fresh
+				mcpHub: mcpHub?.mcpHub,
+				enableMcpServerCreation: true,
 			})
 
 			// Store task and storage adapter in session

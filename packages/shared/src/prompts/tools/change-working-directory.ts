@@ -2,7 +2,7 @@ import { ToolArgs } from "./types.js"
 
 export function getChangeWorkingDirectoryDescription(args: ToolArgs): string {
 	return `## change_working_directory
-Description: Request to change the current working directory for all subsequent file operations and command executions. This tool allows you to navigate to different directories within the workspace, and all relative paths in future operations will be resolved relative to the new working directory.
+Description: IMPORTANT: You may only run this tool if the user explicitly tells you to. Request to change the current working directory for all subsequent file operations and command executions. This tool allows you to navigate to different directories within the workspace, and all relative paths in future operations will be resolved relative to the new working directory.
 Parameters:
 - path: (required) The path of the directory to change to (relative to the current working directory ${args.cwd} or absolute path)
 Usage:

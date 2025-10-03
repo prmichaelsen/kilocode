@@ -1,9 +1,9 @@
-import type { VSCodeAPI } from "../vscode-interfaces.js"
 import type { ApiHandler } from "../api/index.js"
 import type { ClineMessage, ProviderSettings, TokenUsage, ToolUsage, ToolName } from "@roo-code/types"
+import type { McpHub } from "../services/mcp/McpHub.js"
+import type { DiffStrategy } from "../shared/tools.js"
 
 export interface TaskDependencies {
-	vscode?: VSCodeAPI
 	fileSystem?: FileSystemAdapter
 	terminalAdapter?: TerminalAdapter
 	workspacePath: string
@@ -44,6 +44,9 @@ export interface TaskOptions {
 	task?: string
 	images?: string[]
 	mode?: string
+	mcpHub?: McpHub
+	diffStrategy?: DiffStrategy
+	enableMcpServerCreation?: boolean
 }
 
 export interface TaskEvents {

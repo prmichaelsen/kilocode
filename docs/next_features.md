@@ -287,3 +287,19 @@ class VirtualFileSystem {
 3. **Adapter Development**: Implement core VSCode API adapters
 4. **Integration Testing**: Ensure compatibility with existing Kilo Code features
 5. **Performance Testing**: Validate performance with realistic workloads
+
+## Upcoming Features
+
+### MCP (Model Context Protocol) Support
+- **Research MCP Integration**: Look at how MCP tool calls are set up and how MCP servers are configured in the main Kilo Code extension
+- **Web Client MCP Support**: Implement MCP server communication in the web client environment
+- **HTTP/WebSocket MCP**: Support both HTTP and WebSocket-based MCP servers
+- **Server Configuration**: Web-compatible MCP server configuration and management
+- **Tool Execution**: Integrate MCP tool calls into the web client's tool execution pipeline
+
+### Task Interruption & Control
+- **Streaming Interruption**: Implement ability to interrupt a streaming message mid-response
+- **Task Halting**: Allow users to halt/abort a task when the agent is going down a bad path
+- **Graceful Cancellation**: Ensure proper cleanup when tasks are interrupted
+- **UI Controls**: Add stop/cancel buttons in the web interface
+- **State Recovery**: Handle interrupted tasks gracefully and allow resumption

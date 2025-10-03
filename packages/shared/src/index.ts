@@ -14,6 +14,11 @@ export * from './tools/index.js'
 // Export utilities
 export * from './utils/token.js'
 
+// Export MCP services
+export * from './services/mcp/interfaces.js'
+export * from './services/mcp/McpHub.js'
+export * from './services/mcp/NotificationService.js'
+
 // Re-export types from @roo-code/types for convenience
 export type {
   ProviderSettings,

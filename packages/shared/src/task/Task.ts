@@ -21,6 +21,8 @@ import { buildApiHandler } from "../api/index.js"
 import type { TaskDependencies, TaskOptions, TaskEvents, FileSystemAdapter } from "./interfaces.js"
 import type { ClineAskResponse } from "../index.js"
 import { generateWebSystemPrompt } from "../prompts/system.js"
+import type { McpHub } from "../services/mcp/McpHub.js"
+import type { DiffStrategy } from "../shared/tools.js"
 
 export class Task extends EventEmitter<TaskEvents> {
 	readonly taskId: string
@@ -34,6 +36,11 @@ export class Task extends EventEmitter<TaskEvents> {
 	// API
 	readonly apiConfiguration: ProviderSettings
 	api: ApiHandler
+
+	// MCP Support
+	private mcpHub?: McpHub
+	private diffStrategy?: DiffStrategy
+	private enableMcpServerCreation?: boolean
 
 	// State
 	abort: boolean = false
@@ -73,6 +80,11 @@ export class Task extends EventEmitter<TaskEvents> {
 
 		// Set up file system adapter
 		this.fileSystem = options.dependencies.fileSystem || this.createDefaultFileSystem()
+
+		// Store MCP-related options
+		this.mcpHub = options.mcpHub
+		this.diffStrategy = options.diffStrategy
+		this.enableMcpServerCreation = options.enableMcpServerCreation
 
 		this.apiConfiguration = options.apiConfiguration
 		this.api = buildApiHandler(options.apiConfiguration)
@@ -332,7 +344,7 @@ export class Task extends EventEmitter<TaskEvents> {
 		await this.addToApiConversationHistory({ role: "user", content: finalUserContent })
 
 		try {
-			const systemPrompt = this.getSystemPrompt()
+			const systemPrompt = await this.getSystemPrompt()
 
 			const stream = this.api.createMessage(systemPrompt, this.apiConversationHistory, {
 				taskId: this.taskId,
@@ -493,8 +505,13 @@ export class Task extends EventEmitter<TaskEvents> {
 		}
 	}
 
-	private getSystemPrompt(): string {
-		const systemPrompt = generateWebSystemPrompt(this.workspacePath)
+	private async getSystemPrompt(): Promise<string> {
+		const systemPrompt = await generateWebSystemPrompt(
+			this.workspacePath,
+			this.mcpHub,
+			this.diffStrategy,
+			this.enableMcpServerCreation
+		)
 		
 		// Debug: Log the entire system prompt for inspection
 		// console.log('[Task] System Prompt:')
