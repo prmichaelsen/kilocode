@@ -54,4 +54,7 @@ export interface TaskEvents {
 	completed: [result: string]
 	error: [error: string]
 	toolUsed: [toolName: ToolName]
+	interrupted: [reason: string]
+	halted: [reason: string]
+	resumed: []
 }

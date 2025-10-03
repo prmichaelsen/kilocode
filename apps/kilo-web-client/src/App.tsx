@@ -31,7 +31,7 @@ interface ChatMessage {
 
 interface TaskState {
 	taskId?: string
-	status: "idle" | "running" | "waiting" | "completed" | "error"
+	status: "idle" | "running" | "waiting" | "completed" | "error" | "interrupted" | "halted"
 	isStreaming: boolean
 	enableButtons: boolean
 	primaryButtonText?: string
@@ -299,6 +299,10 @@ export default function App() {
 			return
 		}
 
+		// SIMPLE FIX: Removed task interruption/halt/resume message handlers
+		// These messages are no longer sent from the server to avoid chat clutter
+		// Task state changes are handled through task_state messages instead
+
 		console.warn("[App] Unhandled message type:", (message as any).type)
 	}
 
@@ -321,6 +325,32 @@ export default function App() {
 		setMessages((prev) => [...prev, userMessage])
 		setMessageCounter(prev => prev + 1)
 
+		// ENHANCED INTERRUPT COORDINATION: Better handling of streaming interruption
+		if (taskState.isStreaming && currentTaskId) {
+			console.log("[App] Auto-interrupting current stream to send new message")
+			
+			// Send interrupt message
+			const interruptMessage = {
+				type: "interrupt_task",
+				payload: {
+					taskId: currentTaskId,
+					reason: "Auto-interrupted by new user message"
+				},
+				requestId: clientId,
+				timestamp: Date.now(),
+			}
+			
+			// Send interrupt immediately
+			wsRef.current.send(JSON.stringify(interruptMessage))
+			
+			// Update task state to show interruption
+			setTaskState((prev) => ({
+				...prev,
+				status: "interrupted",
+				isStreaming: false
+			}))
+		}
+
 		// Determine message type based on whether we have an active task
 		const messageType = currentTaskId ? "continue_task" : "new_task"
 		
@@ -335,9 +365,17 @@ export default function App() {
 			timestamp: Date.now(),
 		}
 
-		wsRef.current.send(JSON.stringify(message))
+		// Small delay to ensure interrupt is processed first if needed
+		const sendDelay = (taskState.isStreaming && currentTaskId) ? 150 : 0
+		
+		setTimeout(() => {
+			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+				wsRef.current.send(JSON.stringify(message))
+				setTaskState((prev) => ({ ...prev, status: "running", isStreaming: true }))
+			}
+		}, sendDelay)
+
 		setInput("")
-		setTaskState((prev) => ({ ...prev, status: "running", isStreaming: true }))
 		
 		// Keep input focused after sending message
 		setTimeout(() => {
@@ -402,6 +440,58 @@ export default function App() {
 		const message = {
 			type: "delete_task",
 			payload: { taskId },
+			requestId: clientId,
+			timestamp: Date.now(),
+		}
+
+		wsRef.current.send(JSON.stringify(message))
+	}
+
+	// Task Interruption & Control functions
+	const interruptTask = (reason: string = "User interrupted task") => {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !currentTaskId) {
+			return
+		}
+
+		const message = {
+			type: "interrupt_task",
+			payload: {
+				taskId: currentTaskId,
+				reason
+			},
+			requestId: clientId,
+			timestamp: Date.now(),
+		}
+
+		wsRef.current.send(JSON.stringify(message))
+	}
+
+	const haltTask = (reason: string = "Task halted by user") => {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !currentTaskId) {
+			return
+		}
+
+		const message = {
+			type: "halt_task",
+			payload: {
+				taskId: currentTaskId,
+				reason
+			},
+			requestId: clientId,
+			timestamp: Date.now(),
+		}
+
+		wsRef.current.send(JSON.stringify(message))
+	}
+
+	const resumeInterruptedTask = () => {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !currentTaskId) {
+			return
+		}
+
+		const message = {
+			type: "resume_interrupted_task",
+			payload: { taskId: currentTaskId },
 			requestId: clientId,
 			timestamp: Date.now(),
 		}
@@ -528,10 +618,48 @@ export default function App() {
 					</div>
 
 					{(taskState.taskId || currentTaskId) && (
-						<div className="mt-2 text-sm text-gray-300">
-							Task: {taskState.taskId || currentTaskId} | Status: {taskState.status}
-							{taskState.isStreaming && <span className="text-blue-400"> • Streaming...</span>}
-							{currentTaskId && <span className="text-green-400"> • Context Maintained</span>}
+						<div className="mt-2">
+							{/* Task Info - Mobile: Stack vertically, Desktop: Side by side */}
+							<div className="flex flex-col md:flex-row md:justify-between md:items-center gap-2">
+								<div className="text-sm text-gray-300">
+									<div className="truncate">Task: {(taskState.taskId || currentTaskId)?.slice(-12) || 'Unknown'}</div>
+									<div className="flex flex-wrap gap-2 text-xs">
+										<span>Status: {taskState.status}</span>
+										{taskState.isStreaming && <span className="text-blue-400">• Streaming...</span>}
+										{currentTaskId && <span className="text-green-400">• Context Maintained</span>}
+									</div>
+								</div>
+								
+								{/* Task Control Buttons - Mobile: Full width, Desktop: Compact */}
+								<div className="flex gap-1 md:gap-2 w-full md:w-auto">
+									{/* Show interrupt/halt buttons when there's an active task */}
+									{currentTaskId && taskState.status !== "interrupted" && taskState.status !== "halted" && taskState.status !== "error" && (
+										<>
+											<button
+												onClick={() => interruptTask("User requested interruption")}
+												className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-yellow-600 text-white text-xs rounded hover:bg-yellow-700"
+												title="Interrupt task (can be resumed)">
+												Interrupt
+											</button>
+											<button
+												onClick={() => haltTask("User halted task")}
+												className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700"
+												title="Halt task (more aggressive stop)">
+												Halt
+											</button>
+										</>
+									)}
+									
+									{(taskState.status === "interrupted" || taskState.status === "halted") && (
+										<button
+											onClick={resumeInterruptedTask}
+											className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+											title="Resume interrupted/halted task">
+											Resume
+										</button>
+									)}
+								</div>
+							</div>
 						</div>
 					)}
 				</div>
@@ -638,15 +766,15 @@ export default function App() {
 						value={input}
 						onChange={(e) => setInput(e.target.value)}
 						onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-						placeholder={taskState.status === "idle" ? "Send a message..." : "Send a message..."}
+						placeholder={taskState.isStreaming ? "Send to interrupt and queue new message..." : "Send a message..."}
 						className="flex-1 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-						disabled={!isConnected || taskState.isStreaming}
+						disabled={!isConnected}
 					/>
 					<button
 						onClick={sendMessage}
-						disabled={!isConnected || !input.trim() || taskState.isStreaming}
+						disabled={!isConnected || !input.trim()}
 						className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-						{taskState.isStreaming ? "Sending..." : "Send"}
+						Send
 					</button>
 				</div>
 

@@ -38,6 +38,7 @@ interface ClientSession {
 	storageAdapter?: FirebaseTaskStorageAdapter // Storage adapter for conversation persistence
 	messageQueue: Array<{ message: any; resolve: Function; reject: Function }> // Message queue for ordering
 	isProcessingMessage: boolean // Flag to prevent concurrent message processing
+	pendingInterrupt?: { taskId: string; reason: string } // Track pending interrupts
 }
 
 export class SimpleWebServer {
@@ -176,13 +177,25 @@ export class SimpleWebServer {
 		})
 	}
 
-	// Message queueing system to ensure proper ordering
+	// Enhanced message queueing system with priority handling
 	private async queueMessage(session: ClientSession, message: any): Promise<void> {
 		return new Promise((resolve, reject) => {
+			// Special handling for interrupt messages
+			if (message.type === 'interrupt_task') {
+				// Store pending interrupt to coordinate with continue messages
+				session.pendingInterrupt = {
+					taskId: message.payload.taskId,
+					reason: message.payload.reason
+				}
+			}
+			
 			session.messageQueue.push({ message, resolve, reject })
+			
 			this.processMessageQueue(session)
 		})
 	}
+
+	
 
 	private async processMessageQueue(session: ClientSession): Promise<void> {
 		// Prevent concurrent processing
@@ -197,6 +210,28 @@ export class SimpleWebServer {
 				const { message, resolve, reject } = session.messageQueue.shift()!
 				
 				try {
+					// Special coordination for continue_task messages after interrupts
+					if (message.type === 'continue_task' && session.pendingInterrupt) {
+						const interrupt = session.pendingInterrupt
+						
+						// Check if this continue message is for the same task that was interrupted
+						if (message.payload.taskId === interrupt.taskId) {
+							console.log(`[SimpleWebServer] Coordinating interrupt and continue for task ${interrupt.taskId}`)
+							
+							// First handle the interrupt
+							await this.handleInterruptTask(session, {
+								taskId: interrupt.taskId,
+								reason: interrupt.reason
+							})
+							
+							// Clear the pending interrupt
+							session.pendingInterrupt = undefined
+							
+							// Small delay to ensure interrupt is processed
+							await new Promise(resolve => setTimeout(resolve, 100))
+						}
+					}
+					
 					await this.handleClientMessage(session, message)
 					resolve()
 				} catch (error) {
@@ -230,6 +265,15 @@ export class SimpleWebServer {
 				break
 			case "delete_task":
 				await this.handleDeleteTask(session, message.payload)
+				break
+			case "interrupt_task":
+				await this.handleInterruptTask(session, message.payload)
+				break
+			case "halt_task":
+				await this.handleHaltTask(session, message.payload)
+				break
+			case "resume_interrupted_task":
+				await this.handleResumeInterruptedTask(session, message.payload)
 				break
 			default:
 				console.warn(`[SimpleWebServer] Unhandled message type: ${message.type}`)
@@ -549,6 +593,61 @@ export class SimpleWebServer {
 				payload: {
 					taskId,
 					status: "error",
+					isStreaming: false,
+					enableButtons: false,
+				},
+			})
+		})
+
+		// Task Interruption & Control event listeners
+		task.on("interrupted", async (reason: string) => {
+			console.log(`[SimpleWebServer] Task interrupted: ${reason}`)
+			
+			// SIMPLE FIX: Don't send task_interrupted message to client
+			// Just update the task state, no chat message needed
+			
+			// Update task state to show interruption
+			this.sendToClient(session, {
+				type: "task_state",
+				payload: {
+					taskId,
+					status: "interrupted",
+					isStreaming: false,
+					enableButtons: true, // Enable resume button
+				},
+			})
+		})
+
+		task.on("halted", async (reason: string) => {
+			console.log(`[SimpleWebServer] Task halted: ${reason}`)
+			
+			// SIMPLE FIX: Don't send task_halted message to client
+			// Just update the task state, no chat message needed
+			
+			// Update task state to show halt
+			this.sendToClient(session, {
+				type: "task_state",
+				payload: {
+					taskId,
+					status: "halted",
+					isStreaming: false,
+					enableButtons: true, // Enable resume button
+				},
+			})
+		})
+
+		task.on("resumed", async () => {
+			console.log(`[SimpleWebServer] Task resumed`)
+			
+			// SIMPLE FIX: Don't send task_resumed message to client
+			// Just update the task state, no chat message needed
+			
+			// Update task state to show active
+			this.sendToClient(session, {
+				type: "task_state",
+				payload: {
+					taskId,
+					status: "active",
 					isStreaming: false,
 					enableButtons: false,
 				},
@@ -1060,6 +1159,117 @@ export class SimpleWebServer {
 			console.error("[SimpleWebServer] Error deleting task:", error)
 			this.sendToClient(session, {
 				type: "task_deleted_response",
+				payload: {
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+					requestId: payload.requestId,
+				},
+			})
+		}
+	}
+
+	private async handleInterruptTask(session: ClientSession, payload: any) {
+		try {
+			const { taskId, reason = "User interrupted task" } = payload
+			
+			console.log(`[SimpleWebServer] Interrupting task ${taskId}: ${reason}`)
+			
+			if (session.currentTask && session.currentTask.taskId === taskId) {
+				await session.currentTask.interruptTask(reason)
+				
+				this.sendToClient(session, {
+					type: "task_interrupted_response",
+					payload: {
+						success: true,
+						taskId,
+						reason,
+						requestId: payload.requestId,
+					},
+				})
+			} else {
+				throw new Error(`Task ${taskId} not found or not active`)
+			}
+		} catch (error) {
+			console.error("[SimpleWebServer] Error interrupting task:", error)
+			this.sendToClient(session, {
+				type: "task_interrupted_response",
+				payload: {
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+					requestId: payload.requestId,
+				},
+			})
+		}
+	}
+
+	private async handleHaltTask(session: ClientSession, payload: any) {
+		try {
+			const { taskId, reason = "Task halted by user" } = payload
+			
+			console.log(`[SimpleWebServer] Halting task ${taskId}: ${reason}`)
+			
+			if (session.currentTask && session.currentTask.taskId === taskId) {
+				await session.currentTask.haltTask(reason)
+				
+				// Update Firebase task status
+				this.firebaseService.updateTaskStatus(taskId, 'halted' as any).catch(firebaseError => {
+					console.error(`[SimpleWebServer] Failed to update task status to halted in Firebase for task ${taskId}:`, firebaseError)
+				})
+				
+				this.sendToClient(session, {
+					type: "task_halted_response",
+					payload: {
+						success: true,
+						taskId,
+						reason,
+						requestId: payload.requestId,
+					},
+				})
+			} else {
+				throw new Error(`Task ${taskId} not found or not active`)
+			}
+		} catch (error) {
+			console.error("[SimpleWebServer] Error halting task:", error)
+			this.sendToClient(session, {
+				type: "task_halted_response",
+				payload: {
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+					requestId: payload.requestId,
+				},
+			})
+		}
+	}
+
+	private async handleResumeInterruptedTask(session: ClientSession, payload: any) {
+		try {
+			const { taskId } = payload
+			
+			console.log(`[SimpleWebServer] Resuming interrupted task ${taskId}`)
+			
+			if (session.currentTask && session.currentTask.taskId === taskId) {
+				await session.currentTask.resumeTask()
+				
+				// Update Firebase task status
+				this.firebaseService.updateTaskStatus(taskId, 'active').catch(firebaseError => {
+					console.error(`[SimpleWebServer] Failed to update task status to active in Firebase for task ${taskId}:`, firebaseError)
+				})
+				
+				this.sendToClient(session, {
+					type: "task_resumed_response",
+					payload: {
+						success: true,
+						taskId,
+						requestId: payload.requestId,
+					},
+				})
+			} else {
+				throw new Error(`Task ${taskId} not found`)
+			}
+		} catch (error) {
+			console.error("[SimpleWebServer] Error resuming interrupted task:", error)
+			this.sendToClient(session, {
+				type: "task_resumed_response",
 				payload: {
 					success: false,
 					error: error instanceof Error ? error.message : String(error),

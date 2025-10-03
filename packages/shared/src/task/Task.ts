@@ -46,6 +46,11 @@ export class Task extends EventEmitter<TaskEvents> {
 	abort: boolean = false
 	isInitialized = false
 	
+	// Interruption & Control
+	private interrupted: boolean = false
+	private interruptReason?: string
+	private currentStreamController?: AbortController
+	
 	// Working directory management
 	private currentWorkingDirectory: string
 
@@ -242,6 +247,26 @@ export class Task extends EventEmitter<TaskEvents> {
 
 		console.log(`[Task] Continuing conversation for task ${this.taskId}`)
 
+		// ENHANCED FIX: Better handling of interrupted state
+		// Wait for any current streaming to complete before continuing
+		if (this.isStreaming) {
+			console.log(`[Task] Waiting for current streaming to complete before continuing conversation`)
+			// Abort current stream controller if active
+			if (this.currentStreamController) {
+				this.currentStreamController.abort()
+			}
+			// Wait a bit for stream to finish
+			await new Promise(resolve => setTimeout(resolve, 200))
+		}
+
+		// Reset interrupted state when user sends new message
+		if (this.interrupted) {
+			console.log(`[Task] Auto-resuming interrupted task ${this.taskId} due to new user message`)
+			this.interrupted = false
+			this.interruptReason = undefined
+			this.abort = false // Ensure abort flag is also reset
+		}
+
 		// Add user message to conversation
 		await this.say("user_feedback", text, images)
 
@@ -315,18 +340,36 @@ export class Task extends EventEmitter<TaskEvents> {
 	private async initiateTaskLoop(userContent: Anthropic.Messages.ContentBlockParam[]): Promise<void> {
 		let nextUserContent = userContent
 
-		while (!this.abort) {
+		while (!this.abort && !this.interrupted) {
+			// CRITICAL FIX: Check for interruption at the start of each loop iteration
+			// This prevents the agent from getting stuck in thinking loops
+			if (this.interrupted) {
+				console.log(`[Task] Task loop interrupted for task ${this.taskId}`)
+				break
+			}
+
 			const result = await this.recursivelyMakeClineRequests(nextUserContent)
 
 			if (result.didEndLoop) {
 				break
 			} else {
+				// CRITICAL FIX: Check for interruption before continuing the loop
+				// This gives user messages a chance to interrupt between iterations
+				if (this.interrupted || this.abort) {
+					console.log(`[Task] Task loop stopping due to interruption: interrupted=${this.interrupted}, abort=${this.abort}`)
+					break
+				}
+
 				nextUserContent = result.nextUserContent || [
 					{
 						type: "text",
 						text: "Please continue with the task or use attempt_completion if you're finished.",
 					},
 				]
+
+				// CRITICAL FIX: Add a small delay between iterations to allow interruption processing
+				// This prevents the agent from monopolizing the event loop
+				await new Promise(resolve => setTimeout(resolve, 50))
 			}
 		}
 	}
@@ -339,12 +382,23 @@ export class Task extends EventEmitter<TaskEvents> {
 			return { didEndLoop: true } // End gracefully instead of throwing
 		}
 
+		// CRITICAL FIX: Reset interrupted state when starting new request
+		// This prevents the task from getting stuck in interrupted state
+		if (this.interrupted) {
+			console.log(`[Task] Resetting interrupted state for new request in task ${this.taskId}`)
+			this.interrupted = false
+			this.interruptReason = undefined
+		}
+
 		const finalUserContent = [...userContent]
 
 		await this.addToApiConversationHistory({ role: "user", content: finalUserContent })
 
 		try {
 			const systemPrompt = await this.getSystemPrompt()
+
+			// Create AbortController for streaming interruption
+			this.currentStreamController = new AbortController()
 
 			const stream = this.api.createMessage(systemPrompt, this.apiConversationHistory, {
 				taskId: this.taskId,
@@ -356,7 +410,9 @@ export class Task extends EventEmitter<TaskEvents> {
 
 			try {
 				for await (const chunk of stream) {
-					if (this.abort) {
+					// Check for abort or interruption
+					if (this.abort || this.interrupted) {
+						console.log(`[Task] Stream interrupted: abort=${this.abort}, interrupted=${this.interrupted}`)
 						break
 					}
 
@@ -378,6 +434,7 @@ export class Task extends EventEmitter<TaskEvents> {
 				}
 			} finally {
 				this.isStreaming = false
+				this.currentStreamController = undefined
 			}
 
 			// Complete the partial message
@@ -553,6 +610,75 @@ export class Task extends EventEmitter<TaskEvents> {
 		this.emit("error", "Task aborted")
 	}
 
+	// Enhanced interruption methods for Task Interruption & Control
+	public async interruptTask(reason: string = "User interrupted"): Promise<void> {
+		console.log(`[Task] Interrupting task ${this.taskId}: ${reason}`)
+		
+		this.interrupted = true
+		this.interruptReason = reason
+		
+		// Abort current streaming if active
+		if (this.currentStreamController) {
+			this.currentStreamController.abort()
+		}
+		
+		// Emit interruption event
+		this.emit("interrupted", reason)
+		
+		// SIMPLE FIX: Don't add interruption message to conversation
+		// The server will handle notifying the client about interruption
+		// This prevents duplicate interruption messages in the chat
+	}
+
+	public async haltTask(reason: string = "Task halted by user"): Promise<void> {
+		console.log(`[Task] Halting task ${this.taskId}: ${reason}`)
+		
+		// More aggressive halt - sets abort flag and interrupts
+		this.abort = true
+		this.interrupted = true
+		this.interruptReason = reason
+		
+		// Abort current streaming
+		if (this.currentStreamController) {
+			this.currentStreamController.abort()
+		}
+		
+		// Emit halt event
+		this.emit("halted", reason)
+		
+		// SIMPLE FIX: Don't add halt message to conversation
+		// The server will handle notifying the client about halt
+		// This prevents duplicate halt messages in the chat
+	}
+
+	public isInterrupted(): boolean {
+		return this.interrupted
+	}
+
+	public getInterruptReason(): string | undefined {
+		return this.interruptReason
+	}
+
+	public async resumeTask(): Promise<void> {
+		if (!this.interrupted) {
+			console.warn(`[Task] Attempted to resume non-interrupted task ${this.taskId}`)
+			return
+		}
+		
+		console.log(`[Task] Resuming task ${this.taskId}`)
+		
+		this.interrupted = false
+		this.interruptReason = undefined
+		this.abort = false
+		
+		// Emit resume event
+		this.emit("resumed")
+		
+		// SIMPLE FIX: Don't add resume message to conversation
+		// The server will handle notifying the client about resume
+		// This prevents duplicate resume messages in the chat
+	}
+
 	private checkForToolUse(message: string): boolean {
 		// Simple check for tool usage patterns
 		const toolPatterns = [
@@ -631,6 +757,7 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	// Execute tools found in assistant message and return results
+	// CRITICAL FIX: Add interruption checks between tool executions to prevent "thinking loops"
 	private async executeToolsInMessage(message: string): Promise<string | null> {
 		try {
 			// Check if we have a file system adapter for tool execution
@@ -639,18 +766,39 @@ export class Task extends EventEmitter<TaskEvents> {
 				return null
 			}
 
-			// Simple tool execution - this should be replaced with proper tool executor
+			// CRITICAL: Check for interruption before executing any tools
+			if (this.abort || this.interrupted) {
+				console.log(`[Task] Tool execution interrupted: abort=${this.abort}, interrupted=${this.interrupted}`)
+				return `[Tool Execution Interrupted]\n\nTask was interrupted before tool execution could complete.`
+			}
+
+			// Parse all tools from the message first to execute them sequentially with interruption checks
+			const toolResults: string[] = []
+
+			// Execute list_files tool
 			if (message.includes('<list_files>')) {
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during list_files`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
 				try {
 					const files = await this.fileSystem.readDirectory(this.currentWorkingDirectory)
-					return `[list_files Result]\n\nFiles in ${this.currentWorkingDirectory}:\n${files.join('\n')}`
+					toolResults.push(`[list_files Result]\n\nFiles in ${this.currentWorkingDirectory}:\n${files.join('\n')}`)
 				} catch (error) {
-					return `[list_files Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+					toolResults.push(`[list_files Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
 				}
 			}
 
+			// Execute read_file tool
 			if (message.includes('<read_file>')) {
-				// Extract file path from XML tags
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during read_file`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
 				if (pathMatch && pathMatch[1] && this.fileSystem) {
 					try {
@@ -659,29 +807,41 @@ export class Task extends EventEmitter<TaskEvents> {
 						const content = await this.fileSystem.readFile(resolvedPath)
 						// Add line numbers like the main extension does
 						const numberedContent = content.split('\n').map((line, index) => `${index + 1} | ${line}`).join('\n')
-						return `[read_file Result]\n\nFile: ${filePath}\n\n${numberedContent}`
+						toolResults.push(`[read_file Result]\n\nFile: ${filePath}\n\n${numberedContent}`)
 					} catch (error) {
-						return `[read_file Result]\n\nError reading file ${pathMatch[1]}: ${error instanceof Error ? error.message : String(error)}`
+						toolResults.push(`[read_file Result]\n\nError reading file ${pathMatch[1]}: ${error instanceof Error ? error.message : String(error)}`)
 					}
 				}
 			}
 
+			// Execute execute_command tool
 			if (message.includes('<execute_command>')) {
-				// Extract command from XML tags
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during execute_command`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
 				const commandMatch = message.match(/<command>(.*?)<\/command>/s)
 				if (commandMatch && commandMatch[1] && this.dependencies.terminalAdapter) {
 					try {
 						const command = commandMatch[1].trim()
 						const result = await this.dependencies.terminalAdapter.executeCommand(command, this.currentWorkingDirectory)
-						return `[execute_command Result]\n\nCommand: ${command}\nExit Code: ${result.exitCode}\n\nOutput:\n${result.stdout}\n\nError:\n${result.stderr}`
+						toolResults.push(`[execute_command Result]\n\nCommand: ${command}\nExit Code: ${result.exitCode}\n\nOutput:\n${result.stdout}\n\nError:\n${result.stderr}`)
 					} catch (error) {
-						return `[execute_command Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+						toolResults.push(`[execute_command Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
 					}
 				}
 			}
 
+			// Execute write_to_file tool
 			if (message.includes('<write_to_file>')) {
-				// Extract file path and content from XML tags
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during write_to_file`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
 				const contentMatch = message.match(/<content>(.*?)<\/content>/s)
 				if (pathMatch && pathMatch[1] && contentMatch && contentMatch[1]) {
@@ -690,15 +850,21 @@ export class Task extends EventEmitter<TaskEvents> {
 						const resolvedPath = this.resolvePath(filePath)
 						const content = contentMatch[1].trim()
 						await this.fileSystem.writeFile(resolvedPath, content)
-						return `[write_to_file Result]\n\nSuccessfully wrote to file: ${filePath}`
+						toolResults.push(`[write_to_file Result]\n\nSuccessfully wrote to file: ${filePath}`)
 					} catch (error) {
-						return `[write_to_file Result]\n\nError writing file ${pathMatch[1]}: ${error instanceof Error ? error.message : String(error)}`
+						toolResults.push(`[write_to_file Result]\n\nError writing file ${pathMatch[1]}: ${error instanceof Error ? error.message : String(error)}`)
 					}
 				}
 			}
 
+			// Execute search_and_replace tool
 			if (message.includes('<search_and_replace>')) {
-				// Extract parameters from XML tags
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during search_and_replace`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
 				const searchMatch = message.match(/<search>(.*?)<\/search>/s)
 				const replaceMatch = message.match(/<replace>(.*?)<\/replace>/s)
@@ -718,40 +884,55 @@ export class Task extends EventEmitter<TaskEvents> {
 						
 						// Check if any changes were made
 						if (content === updatedContent) {
-							return `[search_and_replace Result]\n\nNo matches found for "${searchText}" in file: ${filePath}`
+							toolResults.push(`[search_and_replace Result]\n\nNo matches found for "${searchText}" in file: ${filePath}`)
+						} else {
+							// Write the updated content back
+							await this.fileSystem.writeFile(resolvedPath, updatedContent)
+							
+							const matchCount = (content.match(new RegExp(searchText, 'g')) || []).length
+							toolResults.push(`[search_and_replace Result]\n\nSuccessfully replaced ${matchCount} occurrence(s) of "${searchText}" with "${replaceText}" in file: ${filePath}`)
 						}
-						
-						// Write the updated content back
-						await this.fileSystem.writeFile(resolvedPath, updatedContent)
-						
-						const matchCount = (content.match(new RegExp(searchText, 'g')) || []).length
-						return `[search_and_replace Result]\n\nSuccessfully replaced ${matchCount} occurrence(s) of "${searchText}" with "${replaceText}" in file: ${filePath}`
 					} catch (error) {
-						return `[search_and_replace Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+						toolResults.push(`[search_and_replace Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
 					}
 				}
 			}
 
+			// Execute change_working_directory tool
 			if (message.includes('<change_working_directory>')) {
-				// Extract directory path from XML tags
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during change_working_directory`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
 				if (pathMatch && pathMatch[1]) {
 					try {
 						const newDirectory = pathMatch[1].trim()
 						const resolvedPath = await this.changeWorkingDirectory(newDirectory)
-						return `[change_working_directory Result]\n\nChanged working directory to: ${resolvedPath}\n\nAll subsequent file operations and commands will be relative to this directory.`
+						toolResults.push(`[change_working_directory Result]\n\nChanged working directory to: ${resolvedPath}\n\nAll subsequent file operations and commands will be relative to this directory.`)
 					} catch (error) {
-						return `[change_working_directory Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+						toolResults.push(`[change_working_directory Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
 					}
 				}
 			}
 
-			// Add more tool implementations as needed
-			return null
+			// Return combined results or null if no tools were executed
+			return toolResults.length > 0 ? toolResults.join('\n\n') : null
 		} catch (error) {
 			console.error("[Task] Error executing tools:", error)
 			return `[Tool Execution Error]\n\n${error instanceof Error ? error.message : String(error)}`
 		}
+	}
+
+	// Helper method to build tool results with interruption message
+	private buildToolResults(existingResults: string[], interruptionMessage: string): string {
+		const results = [...existingResults]
+		if (interruptionMessage) {
+			results.push(interruptionMessage)
+		}
+		return results.join('\n\n')
 	}
 
 	// Helper method to resolve relative paths based on current working directory
