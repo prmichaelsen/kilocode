@@ -35,6 +35,8 @@ interface ClientSession {
 	currentTask?: any // Store the current Task instance
 	messageCounter: number // Track message sequence
 	storageAdapter?: FirebaseTaskStorageAdapter // Storage adapter for conversation persistence
+	messageQueue: Array<{ message: any; resolve: Function; reject: Function }> // Message queue for ordering
+	isProcessingMessage: boolean // Flag to prevent concurrent message processing
 }
 
 export class SimpleWebServer {
@@ -111,6 +113,8 @@ export class SimpleWebServer {
 				messages: [],
 				isActive: true,
 				messageCounter: 0,
+				messageQueue: [],
+				isProcessingMessage: false,
 			}
 
 			this.clients.set(clientId, session)
@@ -128,7 +132,7 @@ export class SimpleWebServer {
 			ws.on("message", async (data) => {
 				try {
 					const message = JSON.parse(data.toString())
-					await this.handleClientMessage(session, message)
+					await this.queueMessage(session, message)
 				} catch (error) {
 					console.error("[SimpleWebServer] Invalid message:", error)
 					this.sendToClient(session, {
@@ -168,8 +172,41 @@ export class SimpleWebServer {
 		})
 	}
 
+	// Message queueing system to ensure proper ordering
+	private async queueMessage(session: ClientSession, message: any): Promise<void> {
+		return new Promise((resolve, reject) => {
+			session.messageQueue.push({ message, resolve, reject })
+			this.processMessageQueue(session)
+		})
+	}
+
+	private async processMessageQueue(session: ClientSession): Promise<void> {
+		// Prevent concurrent processing
+		if (session.isProcessingMessage) {
+			return
+		}
+
+		session.isProcessingMessage = true
+
+		try {
+			while (session.messageQueue.length > 0) {
+				const { message, resolve, reject } = session.messageQueue.shift()!
+				
+				try {
+					await this.handleClientMessage(session, message)
+					resolve()
+				} catch (error) {
+					console.error(`[SimpleWebServer] Error processing queued message:`, error)
+					reject(error)
+				}
+			}
+		} finally {
+			session.isProcessingMessage = false
+		}
+	}
+
 	private async handleClientMessage(session: ClientSession, message: any) {
-		console.log(`[SimpleWebServer] Message from ${session.id}:`, message.type)
+		console.log(`[SimpleWebServer] Processing message from ${session.id}:`, message.type)
 
 		switch (message.type) {
 			case "new_task":
