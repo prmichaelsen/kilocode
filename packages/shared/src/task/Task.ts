@@ -19,6 +19,7 @@ import type { ApiHandler, ApiHandlerCreateMessageMetadata } from "../api/index.j
 import { buildApiHandler } from "../api/index.js"
 import type { TaskDependencies, TaskOptions, TaskEvents, FileSystemAdapter } from "./interfaces.js"
 import type { ClineAskResponse } from "../index.js"
+import { generateWebSystemPrompt } from "../prompts/system.js"
 
 export class Task extends EventEmitter<TaskEvents> {
 	readonly taskId: string
@@ -255,23 +256,7 @@ export class Task extends EventEmitter<TaskEvents> {
 			throw new Error(`Task ${this.taskId} aborted`)
 		}
 
-		// Add environment details
-		const environmentDetails = `<environment_details>
-# Current Working Directory
-${this.workspacePath}
-
-# Available Tools
-- read_file: Read file contents
-- write_to_file: Write content to files  
-- list_files: List directory contents
-- execute_command: Execute shell commands
-- attempt_completion: Complete the task
-
-# File System
-In-memory file system for web environment
-</environment_details>`
-
-		const finalUserContent = [...userContent, { type: "text" as const, text: environmentDetails }]
+		const finalUserContent = [...userContent]
 
 		await this.addToApiConversationHistory({ role: "user", content: finalUserContent })
 
@@ -357,16 +342,15 @@ In-memory file system for web environment
 	}
 
 	private getSystemPrompt(): string {
-		return `You are Kilo Code, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.
-
-You have access to tools that let you read and write files, execute commands, and interact with the user. Use these tools to help accomplish the user's task.
-
-When you need to read a file, use the read_file tool.
-When you need to write or modify files, use the write_to_file tool.
-When you need to execute commands, use the execute_command tool.
-When you have completed the task, use the attempt_completion tool.
-
-Always be helpful, accurate, and efficient in your responses.`
+		const systemPrompt = generateWebSystemPrompt(this.workspacePath)
+		
+		// Debug: Log the entire system prompt for inspection
+		console.log('[Task] System Prompt:')
+		console.log('='.repeat(80))
+		console.log(systemPrompt)
+		console.log('='.repeat(80))
+		
+		return systemPrompt
 	}
 
 	public recordToolUsage(toolName: ToolName) {
@@ -409,6 +393,7 @@ Always be helpful, accurate, and efficient in your responses.`
 			/<list_files>/,
 			/<apply_diff>/,
 			/<search_files>/,
+			/<attempt_completion>/,
 		]
 		return toolPatterns.some((pattern) => pattern.test(message))
 	}
