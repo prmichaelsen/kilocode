@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react"
+import ReactMarkdown from "react-markdown"
 import {
 	WebSocketMessage,
 	ServerMessage,
@@ -6,9 +7,15 @@ import {
 	isTaskStateMessage,
 	isErrorMessage,
 	isConnectionStatusMessage,
+	TaskCreatedMessage,
 } from "@roo-code/web-types"
 import type { ClineMessage } from "@roo-code/types"
 import "./App.css"
+
+// Add missing type guard
+function isTaskCreatedMessage(msg: ServerMessage): msg is TaskCreatedMessage {
+	return msg.type === "task_created"
+}
 
 interface ChatMessage {
 	id: string
@@ -123,37 +130,47 @@ export default function App() {
 			return
 		}
 
+		if (isTaskCreatedMessage(message)) {
+			// Handle task creation - update task state with new task info
+			setTaskState((prev) => ({
+				...prev,
+				taskId: message.payload.taskId,
+				status: "running",
+				isStreaming: true,
+			}))
+			return
+		}
+
 		if (isStreamChunkMessage(message)) {
 			const { content, partial, messageType, ask, say, ts } = message.payload
 
 			setMessages((prev) => {
-				// Find existing message with same timestamp for partial updates
+				// Find existing message with same timestamp for streaming updates
 				const existingIndex = prev.findIndex((msg) => msg.id === ts.toString())
 
-				if (existingIndex !== -1 && partial) {
-					// Update existing partial message
+				if (existingIndex !== -1) {
+					// Update existing message with new content (replace, don't append)
 					return prev.map((msg, idx) =>
-						idx === existingIndex ? { ...msg, content: msg.content + content, partial } : msg,
+						idx === existingIndex
+							? {
+									...msg,
+									content: content, // Replace content entirely for clean streaming
+									partial,
+								}
+							: msg,
 					)
 				} else {
-					// Add new message or complete partial message
+					// Add new message
 					const newMessage: ChatMessage = {
 						id: ts.toString(),
-						content: existingIndex !== -1 ? (prev[existingIndex]?.content ?? "") + content : content, // kilocode_change
+						content: content,
 						type: messageType === "ask" ? "assistant" : "assistant",
 						timestamp: ts,
 						partial,
 						ask,
 						say,
 					}
-
-					if (existingIndex !== -1) {
-						// Replace existing message
-						return prev.map((msg, idx) => (idx === existingIndex ? newMessage : msg))
-					} else {
-						// Add new message
-						return [...prev, newMessage]
-					}
+					return [...prev, newMessage]
 				}
 			})
 			return
@@ -306,7 +323,42 @@ export default function App() {
 								{message.say && ` (${message.say})`}
 								{message.partial && " • Streaming..."}
 							</div>
-							<div className="whitespace-pre-wrap text-sm">{message.content}</div>
+							<div className="text-sm">
+								<ReactMarkdown
+									components={{
+										code: ({ className, children, ...props }) => {
+											const isInline = !className?.includes("language-")
+											return isInline ? (
+												<code
+													className="bg-gray-100 px-1 py-0.5 rounded text-xs font-mono"
+													{...props}>
+													{children}
+												</code>
+											) : (
+												<pre className="bg-gray-100 p-3 rounded-lg overflow-x-auto mt-2 mb-2">
+													<code className="text-xs font-mono" {...props}>
+														{children}
+													</code>
+												</pre>
+											)
+										},
+										p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+										ul: ({ children }) => (
+											<ul className="list-disc list-inside mb-2">{children}</ul>
+										),
+										ol: ({ children }) => (
+											<ol className="list-decimal list-inside mb-2">{children}</ol>
+										),
+										li: ({ children }) => <li className="mb-1">{children}</li>,
+										h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+										h2: ({ children }) => (
+											<h2 className="text-md font-semibold mb-2">{children}</h2>
+										),
+										h3: ({ children }) => <h3 className="text-sm font-medium mb-1">{children}</h3>,
+									}}>
+									{message.content}
+								</ReactMarkdown>
+							</div>
 						</div>
 					</div>
 				))}

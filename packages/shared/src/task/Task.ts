@@ -5,14 +5,14 @@ import { serializeError } from "serialize-error"
 import delay from "delay"
 import pWaitFor from "p-wait-for"
 
-import type { 
-	ClineMessage, 
-	ClineAsk, 
-	ClineSay, 
+import type {
+	ClineMessage,
+	ClineAsk,
+	ClineSay,
 	ProviderSettings,
 	TokenUsage,
 	ToolUsage,
-	ToolName
+	ToolName,
 } from "@roo-code/types"
 
 import type { ApiHandler, ApiHandlerCreateMessageMetadata } from "../api/index.js"
@@ -24,32 +24,32 @@ export class Task extends EventEmitter<TaskEvents> {
 	readonly taskId: string
 	readonly workspacePath: string
 	readonly globalStoragePath: string
-	
+
 	// Dependencies
 	private dependencies: TaskDependencies
 	private fileSystem: FileSystemAdapter
-	
+
 	// API
 	readonly apiConfiguration: ProviderSettings
 	api: ApiHandler
-	
+
 	// State
 	abort: boolean = false
 	isInitialized = false
-	
+
 	// Messages
 	clineMessages: ClineMessage[] = []
 	apiConversationHistory: any[] = []
-	
+
 	// Ask/Response handling
 	private askResponse?: ClineAskResponse
 	private askResponseText?: string
 	private askResponseImages?: string[]
 	public lastMessageTs?: number
-	
+
 	// Tool usage tracking
 	toolUsage: ToolUsage = {}
-	
+
 	// Streaming state
 	isStreaming = false
 	assistantMessageContent: any[] = []
@@ -58,27 +58,27 @@ export class Task extends EventEmitter<TaskEvents> {
 
 	constructor(options: TaskOptions) {
 		super()
-		
+
 		this.taskId = options.taskId || crypto.randomUUID()
 		this.dependencies = options.dependencies
 		this.workspacePath = options.dependencies.workspacePath
 		this.globalStoragePath = options.dependencies.globalStoragePath
-		
+
 		// Set up file system adapter
 		this.fileSystem = options.dependencies.fileSystem || this.createDefaultFileSystem()
-		
+
 		this.apiConfiguration = options.apiConfiguration
 		this.api = buildApiHandler(options.apiConfiguration)
-		
+
 		if (options.task || options.images) {
 			this.startTask(options.task, options.images)
 		}
 	}
-	
+
 	private createDefaultFileSystem(): FileSystemAdapter {
 		// Default in-memory file system for web environment
 		const files = new Map<string, string>()
-		
+
 		return {
 			async readFile(path: string): Promise<string> {
 				const content = files.get(path)
@@ -87,42 +87,42 @@ export class Task extends EventEmitter<TaskEvents> {
 				}
 				return content
 			},
-			
+
 			async writeFile(path: string, content: string): Promise<void> {
 				files.set(path, content)
 			},
-			
+
 			async readDirectory(path: string): Promise<string[]> {
 				const entries: string[] = []
 				for (const [filePath] of files) {
 					if (filePath.startsWith(path)) {
 						const relativePath = filePath.slice(path.length + 1)
-						if (!relativePath.includes('/')) {
+						if (!relativePath.includes("/")) {
 							entries.push(relativePath)
 						}
 					}
 				}
 				return entries
 			},
-			
+
 			async exists(path: string): Promise<boolean> {
 				return files.has(path)
 			},
-			
+
 			async createDirectory(path: string): Promise<void> {
 				// No-op for in-memory system
 			},
-			
+
 			async deleteFile(path: string): Promise<void> {
 				files.delete(path)
-			}
+			},
 		}
 	}
 
 	async ask(
 		type: ClineAsk,
 		text?: string,
-		partial?: boolean
+		partial?: boolean,
 	): Promise<{ response: ClineAskResponse; text?: string; images?: string[] }> {
 		if (this.abort) {
 			throw new Error(`Task ${this.taskId} aborted`)
@@ -130,13 +130,13 @@ export class Task extends EventEmitter<TaskEvents> {
 
 		const askTs = Date.now()
 		this.lastMessageTs = askTs
-		
-		await this.addToClineMessages({ 
-			ts: askTs, 
-			type: "ask", 
-			ask: type, 
-			text, 
-			partial: partial || false 
+
+		await this.addToClineMessages({
+			ts: askTs,
+			type: "ask",
+			ask: type,
+			text,
+			partial: partial || false,
 		})
 
 		// Wait for askResponse to be set
@@ -146,12 +146,12 @@ export class Task extends EventEmitter<TaskEvents> {
 			throw new Error("Current ask promise was ignored")
 		}
 
-		const result = { 
-			response: this.askResponse!, 
-			text: this.askResponseText, 
-			images: this.askResponseImages 
+		const result = {
+			response: this.askResponse!,
+			text: this.askResponseText,
+			images: this.askResponseImages,
 		}
-		
+
 		this.askResponse = undefined
 		this.askResponseText = undefined
 		this.askResponseImages = undefined
@@ -159,26 +159,21 @@ export class Task extends EventEmitter<TaskEvents> {
 		return result
 	}
 
-	async say(
-		type: ClineSay,
-		text?: string,
-		images?: string[],
-		partial?: boolean
-	): Promise<void> {
+	async say(type: ClineSay, text?: string, images?: string[], partial?: boolean): Promise<void> {
 		if (this.abort) {
 			throw new Error(`Task ${this.taskId} aborted`)
 		}
 
 		const sayTs = Date.now()
 		this.lastMessageTs = sayTs
-		
+
 		await this.addToClineMessages({
 			ts: sayTs,
 			type: "say",
 			say: type,
 			text,
 			images,
-			partial: partial || false
+			partial: partial || false,
 		})
 	}
 
@@ -214,13 +209,13 @@ export class Task extends EventEmitter<TaskEvents> {
 
 		let imageBlocks: Anthropic.ImageBlockParam[] = []
 		if (images) {
-			imageBlocks = images.map(image => ({
+			imageBlocks = images.map((image) => ({
 				type: "image" as const,
 				source: {
 					type: "base64" as const,
 					media_type: "image/jpeg" as const,
-					data: image.split(",")[1] || image
-				}
+					data: image.split(",")[1] || image,
+				},
 			}))
 		}
 
@@ -238,19 +233,24 @@ export class Task extends EventEmitter<TaskEvents> {
 		let nextUserContent = userContent
 
 		while (!this.abort) {
-			const didEndLoop = await this.recursivelyMakeClineRequests(nextUserContent)
+			const result = await this.recursivelyMakeClineRequests(nextUserContent)
 
-			if (didEndLoop) {
+			if (result.didEndLoop) {
 				break
 			} else {
-				nextUserContent = [{ type: "text", text: "Please continue with the task or use attempt_completion if you're finished." }]
+				nextUserContent = result.nextUserContent || [
+					{
+						type: "text",
+						text: "Please continue with the task or use attempt_completion if you're finished.",
+					},
+				]
 			}
 		}
 	}
 
 	private async recursivelyMakeClineRequests(
-		userContent: Anthropic.Messages.ContentBlockParam[]
-	): Promise<boolean> {
+		userContent: Anthropic.Messages.ContentBlockParam[],
+	): Promise<{ didEndLoop: boolean; nextUserContent?: Anthropic.Messages.ContentBlockParam[] }> {
 		if (this.abort) {
 			throw new Error(`Task ${this.taskId} aborted`)
 		}
@@ -277,10 +277,10 @@ In-memory file system for web environment
 
 		try {
 			const systemPrompt = this.getSystemPrompt()
-			
+
 			const stream = this.api.createMessage(systemPrompt, this.apiConversationHistory, {
 				taskId: this.taskId,
-				mode: "code"
+				mode: "code",
 			})
 
 			let assistantMessage = ""
@@ -298,12 +298,14 @@ In-memory file system for web environment
 							await this.say("text", assistantMessage, undefined, true)
 							break
 						case "usage":
-							console.log(`[Task] Usage: ${chunk.inputTokens} in, ${chunk.outputTokens} out, cost: $${chunk.totalCost || 0}`)
+							console.log(
+								`[Task] Usage: ${chunk.inputTokens} in, ${chunk.outputTokens} out, cost: $${chunk.totalCost || 0}`,
+							)
 							break
 						case "error":
 							console.error(`[Task] Stream error: ${chunk.error}`)
 							await this.say("error", chunk.message)
-							return true
+							return { didEndLoop: true }
 					}
 				}
 			} finally {
@@ -317,13 +319,36 @@ In-memory file system for web environment
 					role: "assistant",
 					content: [{ type: "text", text: assistantMessage }],
 				})
+
+				// Check for completion or tool use
+				const hasToolUse = this.checkForToolUse(assistantMessage)
+				const hasCompletion = this.checkForCompletion(assistantMessage)
+
+				if (hasCompletion) {
+					console.log(`[Task] Task completed successfully`)
+					this.emit("completed", "Task completed")
+					return { didEndLoop: true }
+				}
+
+				if (!hasToolUse) {
+					// If no tools used, ask for completion or tool use
+					return {
+						didEndLoop: false,
+						nextUserContent: [
+							{
+								type: "text",
+								text: "Please either use a tool to help with the task, or use attempt_completion if you have finished the task.",
+							},
+						],
+					}
+				}
 			}
 
-			return false
+			return { didEndLoop: false }
 		} catch (error) {
 			console.error("[Task] Error in request loop:", error)
 			await this.say("error", `Error: ${error instanceof Error ? error.message : String(error)}`)
-			return true
+			return { didEndLoop: true }
 		}
 	}
 
@@ -366,13 +391,38 @@ Always be helpful, accurate, and efficient in your responses.`
 			totalTokensIn: totalMessages * 100, // Rough estimate
 			totalTokensOut: totalMessages * 50,
 			totalCost: totalMessages * 0.01,
-			contextTokens: totalMessages * 150
+			contextTokens: totalMessages * 150,
 		}
 	}
 
 	public async abortTask() {
 		this.abort = true
 		this.emit("error", "Task aborted")
+	}
+
+	private checkForToolUse(message: string): boolean {
+		// Simple check for tool usage patterns
+		const toolPatterns = [
+			/<read_file>/,
+			/<write_to_file>/,
+			/<execute_command>/,
+			/<list_files>/,
+			/<apply_diff>/,
+			/<search_files>/,
+		]
+		return toolPatterns.some((pattern) => pattern.test(message))
+	}
+
+	private checkForCompletion(message: string): boolean {
+		// Check for completion patterns
+		const completionPatterns = [
+			/<attempt_completion>/,
+			/task.*complete/i,
+			/finished.*task/i,
+			/I have completed/i,
+			/The task is complete/i,
+		]
+		return completionPatterns.some((pattern) => pattern.test(message))
 	}
 
 	public get cwd() {

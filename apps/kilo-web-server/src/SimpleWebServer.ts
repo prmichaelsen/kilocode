@@ -5,8 +5,8 @@ import express from "express"
 import cors from "cors"
 
 // Import from shared package
-import { buildApiHandler, Task } from '@roo-code/shared'
-import type { ApiHandler, ProviderSettings, VSCodeAPI, TaskOptions, TaskDependencies } from '@roo-code/shared'
+import { buildApiHandler, Task } from "@roo-code/shared"
+import type { ApiHandler, ProviderSettings, VSCodeAPI, TaskOptions, TaskDependencies } from "@roo-code/shared"
 
 interface ChatMessage {
 	id: string
@@ -170,7 +170,10 @@ export class SimpleWebServer {
 				const token = process.env.KILOCODE_TOKEN
 				if (!token) {
 					console.error("[SimpleWebServer] KILOCODE_TOKEN environment variable not set")
-					await this.streamResponse(session, "Error: Kilo Code token not configured. Please set KILOCODE_TOKEN environment variable.")
+					await this.streamResponse(
+						session,
+						"Error: Kilo Code token not configured. Please set KILOCODE_TOKEN environment variable.",
+					)
 					return
 				}
 
@@ -185,15 +188,14 @@ For this web interface demonstration, respond naturally and helpfully to the use
 
 			// Convert session messages to Kilo Code API format
 			const apiMessages = session.messages
-				.filter(msg => msg.type !== "error")
-				.map(msg => ({
+				.filter((msg) => msg.type !== "error")
+				.map((msg) => ({
 					role: msg.type === "user" ? "user" : "assistant",
 					content: [{ type: "text", text: msg.content }],
 				}))
 
 			// Use shared Task orchestration instead of direct API calls
 			await this.streamWithTaskOrchestration(session, userText)
-
 		} catch (error) {
 			console.error("[SimpleWebServer] Error with Kilo Code API:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -207,25 +209,29 @@ For this web interface demonstration, respond naturally and helpfully to the use
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-3.5-sonnet:beta"
+				kilocodeModel: "anthropic/claude-3.5-sonnet:beta",
 			}
 
 			// Create task dependencies for web environment
 			const dependencies: TaskDependencies = {
 				workspacePath: "/project",
-				globalStoragePath: "/storage"
+				globalStoragePath: "/storage",
 			}
 
 			// Create Task with orchestration
 			const task = new Task({
 				apiConfiguration: providerConfig,
 				dependencies,
-				task: userText
+				task: userText,
 			})
+
+			// Generate a single timestamp for this entire response stream
+			const responseTimestamp = Date.now()
 
 			// Listen to task events and stream to client
 			task.on("message", (message) => {
 				if (message.type === "say" && message.say === "text") {
+					// Use the same timestamp for all chunks in this response
 					this.sendToClient(session, {
 						type: "stream_chunk",
 						payload: {
@@ -233,9 +239,20 @@ For this web interface demonstration, respond naturally and helpfully to the use
 							partial: message.partial || false,
 							messageType: "say",
 							say: "text",
-							ts: message.ts,
+							ts: responseTimestamp, // Use consistent timestamp
 						},
 					})
+
+					// Only add to session messages when complete
+					if (!message.partial) {
+						const assistantMessage: ChatMessage = {
+							id: responseTimestamp.toString(),
+							content: message.text || "",
+							type: "assistant",
+							timestamp: responseTimestamp,
+						}
+						session.messages.push(assistantMessage)
+					}
 				}
 			})
 
@@ -252,7 +269,6 @@ For this web interface demonstration, respond naturally and helpfully to the use
 			})
 
 			console.log(`[SimpleWebServer] Started Task orchestration for session ${session.id}`)
-
 		} catch (error) {
 			console.error("[SimpleWebServer] Error with Task orchestration:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -260,13 +276,18 @@ For this web interface demonstration, respond naturally and helpfully to the use
 		}
 	}
 
-	private async streamWithSharedApiHandler(session: ClientSession, systemPrompt: string, apiMessages: any[], userText: string) {
+	private async streamWithSharedApiHandler(
+		session: ClientSession,
+		systemPrompt: string,
+		apiMessages: any[],
+		userText: string,
+	) {
 		try {
 			// Create provider configuration for KiloCode
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-3.5-sonnet:beta"
+				kilocodeModel: "anthropic/claude-3.5-sonnet:beta",
 			}
 
 			// Create API handler using shared buildApiHandler
@@ -276,7 +297,7 @@ For this web interface demonstration, respond naturally and helpfully to the use
 			// Create streaming request
 			const stream = apiHandler.createMessage(systemPrompt, apiMessages, {
 				taskId: `task_${Date.now()}`,
-				mode: "code"
+				mode: "code",
 			})
 
 			let fullResponse = ""
@@ -286,7 +307,7 @@ For this web interface demonstration, respond naturally and helpfully to the use
 				switch (chunk.type) {
 					case "text":
 						fullResponse += chunk.text
-						
+
 						// Send streaming chunk to client
 						this.sendToClient(session, {
 							type: "stream_chunk",
@@ -299,11 +320,13 @@ For this web interface demonstration, respond naturally and helpfully to the use
 							},
 						})
 						break
-					
+
 					case "usage":
-						console.log(`[SimpleWebServer] Usage: ${chunk.inputTokens} in, ${chunk.outputTokens} out, cost: $${chunk.totalCost || 0}`)
+						console.log(
+							`[SimpleWebServer] Usage: ${chunk.inputTokens} in, ${chunk.outputTokens} out, cost: $${chunk.totalCost || 0}`,
+						)
 						break
-					
+
 					case "error":
 						console.error(`[SimpleWebServer] Stream error: ${chunk.error}`)
 						await this.streamResponse(session, `Error: ${chunk.message}`)
@@ -333,7 +356,6 @@ For this web interface demonstration, respond naturally and helpfully to the use
 			session.messages.push(assistantMessage)
 
 			console.log(`[SimpleWebServer] Completed shared API handler streaming for session ${session.id}`)
-
 		} catch (error) {
 			console.error("[SimpleWebServer] Error with shared API handler:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -341,7 +363,12 @@ For this web interface demonstration, respond naturally and helpfully to the use
 		}
 	}
 
-	private async streamKilocodeResponse(session: ClientSession, systemPrompt: string, apiMessages: any[], userText: string) {
+	private async streamKilocodeResponse(
+		session: ClientSession,
+		systemPrompt: string,
+		apiMessages: any[],
+		userText: string,
+	) {
 		try {
 			// Determine Kilo Code API base URL from token
 			const baseUri = this.getKiloBaseUriFromToken(session.kilocodeToken!)
@@ -350,10 +377,7 @@ For this web interface demonstration, respond naturally and helpfully to the use
 			// Prepare request payload
 			const payload = {
 				model: "anthropic/claude-3.5-sonnet:beta", // Default Kilo Code model
-				messages: [
-					{ role: "system", content: systemPrompt },
-					...apiMessages,
-				],
+				messages: [{ role: "system", content: systemPrompt }, ...apiMessages],
 				stream: true,
 				max_tokens: 4096,
 			}
@@ -363,7 +387,7 @@ For this web interface demonstration, respond naturally and helpfully to the use
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					"Authorization": `Bearer ${session.kilocodeToken}`,
+					Authorization: `Bearer ${session.kilocodeToken}`,
 					"X-KILOCODE-TASKID": `task_${Date.now()}`,
 				},
 				body: JSON.stringify(payload),
@@ -375,7 +399,6 @@ For this web interface demonstration, respond naturally and helpfully to the use
 
 			// Stream the response
 			await this.processKilocodeStream(session, response)
-
 		} catch (error) {
 			console.error("[SimpleWebServer] Error with Kilo Code API:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -398,15 +421,15 @@ For this web interface demonstration, respond naturally and helpfully to the use
 				if (done) break
 
 				const chunk = decoder.decode(value, { stream: true })
-				const lines = chunk.split('\n')
+				const lines = chunk.split("\n")
 
 				for (const line of lines) {
-					if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+					if (line.startsWith("data: ") && line !== "data: [DONE]") {
 						try {
 							const data = JSON.parse(line.slice(6))
 							if (data.choices?.[0]?.delta?.content) {
 								fullResponse += data.choices[0].delta.content
-								
+
 								// Send streaming chunk to client
 								this.sendToClient(session, {
 									type: "stream_chunk",
@@ -449,10 +472,12 @@ For this web interface demonstration, respond naturally and helpfully to the use
 			session.messages.push(assistantMessage)
 
 			console.log(`[SimpleWebServer] Completed Kilo Code LLM streaming for session ${session.id}`)
-
 		} catch (error) {
 			console.error("[SimpleWebServer] Error processing Kilo Code stream:", error)
-			await this.streamResponse(session, `Streaming error: ${error instanceof Error ? error.message : String(error)}`)
+			await this.streamResponse(
+				session,
+				`Streaming error: ${error instanceof Error ? error.message : String(error)}`,
+			)
 		} finally {
 			reader.releaseLock()
 		}
