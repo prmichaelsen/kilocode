@@ -52,9 +52,9 @@ class WebProviderAdapter {
 	}
 
 	async ensureSettingsDirectoryExists(): Promise<string> {
-		// Always use $HOME/kilo-web/config for MCP settings
+		// Always use $HOME/notebin/config for MCP settings
 		const homeDir = process.env.HOME || "/home/user"
-		const settingsDir = path.join(homeDir, "kilo-web", "config")
+		const settingsDir = path.join(homeDir, "notebin", "config")
 		await fs.mkdir(settingsDir, { recursive: true })
 		return settingsDir
 	}

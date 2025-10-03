@@ -355,15 +355,15 @@ export class SimpleWebServer {
 			}
 
 			// Create task dependencies for web environment with real adapters
-			// Use the web server directory as workspace so MCP settings can be found
-			const workspacePath = process.cwd()
+			// PRIORITY: Initial working directory should always be $HOME
+			const workspacePath = process.env.HOME || "/home/user"
 			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
 			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
 			const storageAdapter = new FirebaseTaskStorageAdapter()
 			
 			const dependencies: TaskDependencies = {
 				workspacePath,
-				globalStoragePath: "/tmp/kilo-web-storage", // Use temp directory for storage
+				globalStoragePath: "/tmp/notebin-storage", // Use temp directory for storage
 				fileSystem: fileSystemAdapter,
 				terminalAdapter,
 				storage: storageAdapter,
@@ -621,15 +621,15 @@ export class SimpleWebServer {
 			}
 
 			// Create task dependencies with storage adapter
-			// Use the web server directory as workspace so MCP settings can be found
-			const workspacePath = process.cwd()
+			// PRIORITY: Initial working directory should always be $HOME
+			const workspacePath = process.env.HOME || "/home/user"
 			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
 			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
 			const storageAdapter = new FirebaseTaskStorageAdapter()
 			
 			const dependencies: TaskDependencies = {
 				workspacePath,
-				globalStoragePath: "/tmp/kilo-web-storage",
+				globalStoragePath: "/tmp/notebin-storage",
 				fileSystem: fileSystemAdapter,
 				terminalAdapter,
 				storage: storageAdapter,
