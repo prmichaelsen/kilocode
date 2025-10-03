@@ -1,0 +1,105 @@
+import { Anthropic } from "@anthropic-ai/sdk";
+import { type ModelInfo } from "@roo-code/types";
+import type { ApiHandlerOptions, ModelRecord } from "../../shared/api";
+import { ApiStream, ApiStreamUsageChunk } from "../transform/stream";
+import { AnthropicReasoningParams } from "../transform/reasoning";
+import { BaseProvider } from "./base-provider";
+import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index";
+export declare class RequestyHandler extends BaseProvider implements SingleCompletionHandler {
+    protected options: ApiHandlerOptions;
+    protected models: ModelRecord;
+    private client;
+    private baseURL;
+    private readonly providerName;
+    constructor(options: ApiHandlerOptions);
+    fetchModel(): Promise<{
+        format: "anthropic";
+        reasoning: AnthropicReasoningParams | undefined;
+        maxTokens: number | undefined;
+        temperature: number | undefined;
+        reasoningEffort: import("@roo-code/types").ReasoningEffortWithMinimal | undefined;
+        reasoningBudget: number | undefined;
+        verbosity: import("@roo-code/types").VerbosityLevel | undefined;
+        id: string;
+        info: {
+            maxTokens?: number;
+            maxThinkingTokens?: number;
+            contextWindow?: number;
+            supportsImages?: boolean;
+            supportsComputerUse?: boolean;
+            supportsPromptCache?: boolean;
+            supportsVerbosity?: boolean;
+            supportsReasoningBudget?: boolean;
+            supportsTemperature?: boolean;
+            requiredReasoningBudget?: boolean;
+            supportsReasoningEffort?: boolean;
+            supportedParameters?: ("reasoning" | "max_tokens" | "temperature" | "include_reasoning")[];
+            inputPrice?: number;
+            outputPrice?: number;
+            cacheWritesPrice?: number;
+            cacheReadsPrice?: number;
+            description?: string;
+            reasoningEffort?: "low" | "medium" | "high";
+            minTokensPerCachePoint?: number;
+            maxCachePoints?: number;
+            cachableFields?: string[];
+            displayName?: string;
+            preferredIndex?: number;
+            tiers?: {
+                name?: "default" | "flex" | "priority";
+                contextWindow?: number;
+                inputPrice?: number;
+                outputPrice?: number;
+                cacheWritesPrice?: number;
+                cacheReadsPrice?: number;
+            }[];
+        };
+    }>;
+    getModel(): {
+        format: "anthropic";
+        reasoning: AnthropicReasoningParams | undefined;
+        maxTokens: number | undefined;
+        temperature: number | undefined;
+        reasoningEffort: import("@roo-code/types").ReasoningEffortWithMinimal | undefined;
+        reasoningBudget: number | undefined;
+        verbosity: import("@roo-code/types").VerbosityLevel | undefined;
+        id: string;
+        info: {
+            maxTokens?: number;
+            maxThinkingTokens?: number;
+            contextWindow?: number;
+            supportsImages?: boolean;
+            supportsComputerUse?: boolean;
+            supportsPromptCache?: boolean;
+            supportsVerbosity?: boolean;
+            supportsReasoningBudget?: boolean;
+            supportsTemperature?: boolean;
+            requiredReasoningBudget?: boolean;
+            supportsReasoningEffort?: boolean;
+            supportedParameters?: ("reasoning" | "max_tokens" | "temperature" | "include_reasoning")[];
+            inputPrice?: number;
+            outputPrice?: number;
+            cacheWritesPrice?: number;
+            cacheReadsPrice?: number;
+            description?: string;
+            reasoningEffort?: "low" | "medium" | "high";
+            minTokensPerCachePoint?: number;
+            maxCachePoints?: number;
+            cachableFields?: string[];
+            displayName?: string;
+            preferredIndex?: number;
+            tiers?: {
+                name?: "default" | "flex" | "priority";
+                contextWindow?: number;
+                inputPrice?: number;
+                outputPrice?: number;
+                cacheWritesPrice?: number;
+                cacheReadsPrice?: number;
+            }[];
+        };
+    };
+    protected processUsageMetrics(usage: any, modelInfo?: ModelInfo): ApiStreamUsageChunk;
+    createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[], metadata?: ApiHandlerCreateMessageMetadata): ApiStream;
+    completePrompt(prompt: string): Promise<string>;
+}
+//# sourceMappingURL=requesty.d.ts.map

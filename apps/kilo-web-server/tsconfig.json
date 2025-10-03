@@ -1,0 +1,29 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "node",
+		"outDir": "./dist",
+		"rootDir": "./src",
+		"allowSyntheticDefaultImports": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"strict": false,
+		"noEmit": false,
+		"resolveJsonModule": true,
+		"declaration": false,
+		"sourceMap": false
+	},
+	"include": [
+		"src/SimpleWebServer.ts",
+		"src/index.ts"
+	],
+	"exclude": [
+		"node_modules",
+		"dist",
+		"src/adapters",
+		"src/KiloWebServer.ts",
+		"src/WebClineProvider.ts",
+		"src/WebTaskManager.ts"
+	]
+}

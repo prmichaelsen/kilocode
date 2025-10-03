@@ -1,7 +1,12 @@
+import { WebSocketServer } from "ws"
 import WebSocket from "ws"
 import { createServer } from "http"
 import express from "express"
 import cors from "cors"
+
+// Import from shared package
+import { buildApiHandler, Task } from '@roo-code/shared'
+import type { ApiHandler, ProviderSettings, VSCodeAPI, TaskOptions, TaskDependencies } from '@roo-code/shared'
 
 interface ChatMessage {
 	id: string
@@ -16,12 +21,13 @@ interface ClientSession {
 	ws: WebSocket
 	messages: ChatMessage[]
 	isActive: boolean
+	kilocodeToken?: string
 }
 
 export class SimpleWebServer {
 	private app = express()
 	private server = createServer(this.app)
-	private wss!: WebSocket.Server
+	private wss!: WebSocketServer
 	private clients = new Map<string, ClientSession>()
 
 	constructor() {
@@ -59,7 +65,7 @@ export class SimpleWebServer {
 	}
 
 	private setupWebSocket() {
-		this.wss = new WebSocket.Server({
+		this.wss = new WebSocketServer({
 			server: this.server,
 			path: "/ws",
 		})
@@ -158,49 +164,304 @@ export class SimpleWebServer {
 	}
 
 	private async simulateAgentResponse(session: ClientSession, userText: string) {
-		// Simple simulation of agent behavior for POC
-		let response = ""
+		try {
+			// Initialize Kilo Code token if not already done
+			if (!session.kilocodeToken) {
+				const token = process.env.KILOCODE_TOKEN
+				if (!token) {
+					console.error("[SimpleWebServer] KILOCODE_TOKEN environment variable not set")
+					await this.streamResponse(session, "Error: Kilo Code token not configured. Please set KILOCODE_TOKEN environment variable.")
+					return
+				}
 
-		if (userText.toLowerCase().includes("list") && userText.toLowerCase().includes("file")) {
-			response = `I'll list the files in the current project for you.
+				session.kilocodeToken = token
+				console.log(`[SimpleWebServer] Kilo Code token configured for session ${session.id}`)
+			}
 
-Here are the files I found:
-- README.md
-- src/index.js
-- src/utils.js
-- package.json
-- .gitignore
+			// Create system prompt
+			const systemPrompt = `You are Kilo Code, a helpful AI assistant. You can help with coding tasks, answer questions, and provide explanations.
 
-Would you like me to read any of these files or perform another operation?`
-		} else if (userText.toLowerCase().includes("read") && userText.toLowerCase().includes("readme")) {
-			response = `I'll read the README.md file for you.
+For this web interface demonstration, respond naturally and helpfully to the user's request.`
 
-# My Project
+			// Convert session messages to Kilo Code API format
+			const apiMessages = session.messages
+				.filter(msg => msg.type !== "error")
+				.map(msg => ({
+					role: msg.type === "user" ? "user" : "assistant",
+					content: [{ type: "text", text: msg.content }],
+				}))
 
-This is a test project for the Kilo Code web POC.
+			// Use shared Task orchestration instead of direct API calls
+			await this.streamWithTaskOrchestration(session, userText)
 
-## Features
-- Basic file operations
-- Tool execution
-- Agent conversation
+		} catch (error) {
+			console.error("[SimpleWebServer] Error with Kilo Code API:", error)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			await this.streamResponse(session, `I encountered an error: ${errorMessage}`)
+		}
+	}
 
-## Getting Started
-Run the agent and ask it to explore the project structure.
+	private async streamWithTaskOrchestration(session: ClientSession, userText: string) {
+		try {
+			// Create provider configuration for KiloCode
+			const providerConfig: ProviderSettings = {
+				apiProvider: "kilocode",
+				kilocodeToken: session.kilocodeToken!,
+				kilocodeModel: "anthropic/claude-3.5-sonnet:beta"
+			}
 
-The README shows this is a test project with basic functionality.`
-		} else {
-			response = `I understand you want me to: "${userText}"
+			// Create task dependencies for web environment
+			const dependencies: TaskDependencies = {
+				workspacePath: "/project",
+				globalStoragePath: "/storage"
+			}
 
-For this POC, I can help you with:
-- Listing files in the project
-- Reading file contents
-- Basic code analysis
+			// Create Task with orchestration
+			const task = new Task({
+				apiConfiguration: providerConfig,
+				dependencies,
+				task: userText
+			})
 
-Try asking me to "list the files in the project" or "read the README file".`
+			// Listen to task events and stream to client
+			task.on("message", (message) => {
+				if (message.type === "say" && message.say === "text") {
+					this.sendToClient(session, {
+						type: "stream_chunk",
+						payload: {
+							content: message.text || "",
+							partial: message.partial || false,
+							messageType: "say",
+							say: "text",
+							ts: message.ts,
+						},
+					})
+				}
+			})
+
+			task.on("completed", (result) => {
+				console.log(`[SimpleWebServer] Task completed: ${result}`)
+			})
+
+			task.on("error", (error) => {
+				console.error(`[SimpleWebServer] Task error: ${error}`)
+				this.sendToClient(session, {
+					type: "error",
+					payload: { message: error },
+				})
+			})
+
+			console.log(`[SimpleWebServer] Started Task orchestration for session ${session.id}`)
+
+		} catch (error) {
+			console.error("[SimpleWebServer] Error with Task orchestration:", error)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			await this.streamResponse(session, `Task orchestration error: ${errorMessage}`)
+		}
+	}
+
+	private async streamWithSharedApiHandler(session: ClientSession, systemPrompt: string, apiMessages: any[], userText: string) {
+		try {
+			// Create provider configuration for KiloCode
+			const providerConfig: ProviderSettings = {
+				apiProvider: "kilocode",
+				kilocodeToken: session.kilocodeToken!,
+				kilocodeModel: "anthropic/claude-3.5-sonnet:beta"
+			}
+
+			// Create API handler using shared buildApiHandler
+			const apiHandler = buildApiHandler(providerConfig)
+			console.log(`[SimpleWebServer] Created API handler for model: ${apiHandler.getModel().id}`)
+
+			// Create streaming request
+			const stream = apiHandler.createMessage(systemPrompt, apiMessages, {
+				taskId: `task_${Date.now()}`,
+				mode: "code"
+			})
+
+			let fullResponse = ""
+
+			// Process the stream
+			for await (const chunk of stream) {
+				switch (chunk.type) {
+					case "text":
+						fullResponse += chunk.text
+						
+						// Send streaming chunk to client
+						this.sendToClient(session, {
+							type: "stream_chunk",
+							payload: {
+								content: fullResponse,
+								partial: true,
+								messageType: "say",
+								say: "text",
+								ts: Date.now(),
+							},
+						})
+						break
+					
+					case "usage":
+						console.log(`[SimpleWebServer] Usage: ${chunk.inputTokens} in, ${chunk.outputTokens} out, cost: $${chunk.totalCost || 0}`)
+						break
+					
+					case "error":
+						console.error(`[SimpleWebServer] Stream error: ${chunk.error}`)
+						await this.streamResponse(session, `Error: ${chunk.message}`)
+						return
+				}
+			}
+
+			// Send final complete message
+			this.sendToClient(session, {
+				type: "stream_chunk",
+				payload: {
+					content: fullResponse,
+					partial: false,
+					messageType: "say",
+					say: "text",
+					ts: Date.now(),
+				},
+			})
+
+			// Add assistant message to session
+			const assistantMessage: ChatMessage = {
+				id: Date.now().toString(),
+				content: fullResponse,
+				type: "assistant",
+				timestamp: Date.now(),
+			}
+			session.messages.push(assistantMessage)
+
+			console.log(`[SimpleWebServer] Completed shared API handler streaming for session ${session.id}`)
+
+		} catch (error) {
+			console.error("[SimpleWebServer] Error with shared API handler:", error)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			await this.streamResponse(session, `Shared API handler error: ${errorMessage}`)
+		}
+	}
+
+	private async streamKilocodeResponse(session: ClientSession, systemPrompt: string, apiMessages: any[], userText: string) {
+		try {
+			// Determine Kilo Code API base URL from token
+			const baseUri = this.getKiloBaseUriFromToken(session.kilocodeToken!)
+			const apiUrl = `${baseUri}/api/openrouter/chat/completions`
+
+			// Prepare request payload
+			const payload = {
+				model: "anthropic/claude-3.5-sonnet:beta", // Default Kilo Code model
+				messages: [
+					{ role: "system", content: systemPrompt },
+					...apiMessages,
+				],
+				stream: true,
+				max_tokens: 4096,
+			}
+
+			// Make streaming request to Kilo Code API
+			const response = await fetch(apiUrl, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Authorization": `Bearer ${session.kilocodeToken}`,
+					"X-KILOCODE-TASKID": `task_${Date.now()}`,
+				},
+				body: JSON.stringify(payload),
+			})
+
+			if (!response.ok) {
+				throw new Error(`Kilo Code API error: ${response.status} ${response.statusText}`)
+			}
+
+			// Stream the response
+			await this.processKilocodeStream(session, response)
+
+		} catch (error) {
+			console.error("[SimpleWebServer] Error with Kilo Code API:", error)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			await this.streamResponse(session, `Kilo Code API error: ${errorMessage}`)
+		}
+	}
+
+	private async processKilocodeStream(session: ClientSession, response: Response) {
+		const reader = response.body?.getReader()
+		if (!reader) {
+			throw new Error("No response body reader available")
 		}
 
-		// Stream the response in chunks to simulate real agent behavior
-		await this.streamResponse(session, response)
+		const decoder = new TextDecoder()
+		let fullResponse = ""
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read()
+				if (done) break
+
+				const chunk = decoder.decode(value, { stream: true })
+				const lines = chunk.split('\n')
+
+				for (const line of lines) {
+					if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+						try {
+							const data = JSON.parse(line.slice(6))
+							if (data.choices?.[0]?.delta?.content) {
+								fullResponse += data.choices[0].delta.content
+								
+								// Send streaming chunk to client
+								this.sendToClient(session, {
+									type: "stream_chunk",
+									payload: {
+										content: fullResponse,
+										partial: true,
+										messageType: "say",
+										say: "text",
+										ts: Date.now(),
+									},
+								})
+							}
+						} catch (parseError) {
+							// Skip invalid JSON lines
+							continue
+						}
+					}
+				}
+			}
+
+			// Send final complete message
+			this.sendToClient(session, {
+				type: "stream_chunk",
+				payload: {
+					content: fullResponse,
+					partial: false,
+					messageType: "say",
+					say: "text",
+					ts: Date.now(),
+				},
+			})
+
+			// Add assistant message to session
+			const assistantMessage: ChatMessage = {
+				id: Date.now().toString(),
+				content: fullResponse,
+				type: "assistant",
+				timestamp: Date.now(),
+			}
+			session.messages.push(assistantMessage)
+
+			console.log(`[SimpleWebServer] Completed Kilo Code LLM streaming for session ${session.id}`)
+
+		} catch (error) {
+			console.error("[SimpleWebServer] Error processing Kilo Code stream:", error)
+			await this.streamResponse(session, `Streaming error: ${error instanceof Error ? error.message : String(error)}`)
+		} finally {
+			reader.releaseLock()
+		}
+	}
+
+	private getKiloBaseUriFromToken(token: string): string {
+		// Simple token-based URL determination (simplified version)
+		// In the real implementation, this would parse the token to determine the correct base URI
+		return "https://api.kilocode.ai" // Default Kilo Code API URL
 	}
 
 	private async streamResponse(session: ClientSession, fullResponse: string) {
@@ -281,5 +542,4 @@ Try asking me to "list the files in the project" or "read the README file".`
 	}
 }
 
-// Export the class for use in index.ts
-export { SimpleWebServer }
+// Export the class for use in index.ts (already exported above)

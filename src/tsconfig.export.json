@@ -1,0 +1,30 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"outDir": "./",
+		"declaration": true,
+		"emitDeclarationOnly": false,
+		"skipLibCheck": true,
+		"moduleResolution": "bundler"
+	},
+	"include": [
+		"index.ts",
+		"api/index.ts",
+		"api/transform/stream.ts",
+		"core/task/Task.ts"
+	],
+	"exclude": [
+		"node_modules",
+		"dist",
+		"**/*.spec.ts",
+		"**/*.test.ts",
+		"**/__tests__/**",
+		"extension.ts",
+		"activate/**",
+		"integrations/**",
+		"services/**",
+		"core/webview/**",
+		"core/tools/**",
+		"shared/**"
+	]
+}

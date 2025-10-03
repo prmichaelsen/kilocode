@@ -1,0 +1,50 @@
+graph TB
+    subgraph "Browser Environment"
+        Client[React Web Client<br/>apps/kilo-web-client]
+        Client --> |"WebSocket Messages<br/>@roo-code/web-types"| WS[WebSocket Connection]
+        Client --> |"OAuth Only"| GitHub[GitHub API<br/>Repository Access]
+    end
+    
+    subgraph "Node.js Server Environment"
+        WS --> Server[WebSocket Server<br/>apps/kilo-web-server]
+        
+        subgraph "Kilo Code Core Integration"
+            Server --> API[buildApiHandler<br/>src/api/index.ts]
+            Server --> Task[Task Class<br/>src/core/task/Task.ts]
+            Server --> Provider[ClineProvider<br/>src/core/webview/ClineProvider.ts]
+        end
+        
+        subgraph "LLM Providers"
+            API --> OpenAI[OpenAI]
+            API --> Anthropic[Anthropic]
+            API --> Others[20+ Other Providers]
+        end
+        
+        subgraph "Tool System"
+            Task --> Tools[Tool Execution<br/>src/core/tools/]
+            Tools --> FileOps[File Operations]
+            Tools --> Terminal[Terminal Commands]
+            Tools --> Browser[Browser Actions]
+        end
+        
+        subgraph "Services"
+            Server --> MCP[MCP Integration<br/>src/services/mcp/]
+            Server --> VFS[Virtual File System<br/>In-Memory + GitHub]
+            Server --> State[State Management<br/>adapters/StateManager.ts]
+        end
+    end
+    
+    subgraph "External Services"
+        VFS --> |"Persistence"| GitHubAPI[GitHub API<br/>Remote Commits]
+        MCP --> MCPServers[MCP Servers<br/>External Tools]
+    end
+
+    classDef client fill:#1976d2,stroke:#0d47a1,stroke-width:2px,color:#ffffff
+    classDef server fill:#7b1fa2,stroke:#4a148c,stroke-width:2px,color:#ffffff
+    classDef external fill:#f57c00,stroke:#e65100,stroke-width:2px,color:#ffffff
+    classDef core fill:#388e3c,stroke:#1b5e20,stroke-width:2px,color:#ffffff
+    
+    class Client,WS,GitHub client
+    class Server,API,Task,Provider,Tools,MCP,VFS,State server
+    class OpenAI,Anthropic,Others,GitHubAPI,MCPServers external
+    class FileOps,Terminal,Browser core

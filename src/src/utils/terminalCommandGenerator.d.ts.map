@@ -1,0 +1,1 @@
+{"version":3,"file":"terminalCommandGenerator.d.ts","sourceRoot":"","sources":["../../utils/terminalCommandGenerator.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,MAAM,MAAM,QAAQ,CAAA;AAShC,MAAM,WAAW,+BAA+B;IAC/C,aAAa,EAAE,MAAM,CAAC,aAAa,CAAA;IACnC,OAAO,EAAE,MAAM,CAAC,gBAAgB,CAAA;CAChC;AAED,wBAAsB,uBAAuB,CAAC,OAAO,EAAE,+BAA+B,GAAG,OAAO,CAAC,IAAI,CAAC,CAwBrG"}

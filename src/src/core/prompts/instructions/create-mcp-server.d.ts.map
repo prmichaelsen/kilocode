@@ -1,0 +1,1 @@
+{"version":3,"file":"create-mcp-server.d.ts","sourceRoot":"","sources":["../../../../core/prompts/instructions/create-mcp-server.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,MAAM,EAAE,MAAM,8BAA8B,CAAA;AACrD,OAAO,EAAE,YAAY,EAAE,MAAM,uBAAuB,CAAA;AAEpD,wBAAsB,2BAA2B,CAChD,MAAM,EAAE,MAAM,GAAG,SAAS,EAC1B,YAAY,EAAE,YAAY,GAAG,SAAS,GACpC,OAAO,CAAC,MAAM,CAAC,CA0TjB"}

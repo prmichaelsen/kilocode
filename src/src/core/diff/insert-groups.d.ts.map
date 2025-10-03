@@ -1,0 +1,1 @@
+{"version":3,"file":"insert-groups.d.ts","sourceRoot":"","sources":["../../../core/diff/insert-groups.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AACH,MAAM,WAAW,WAAW;IAC3B,KAAK,EAAE,MAAM,CAAA;IACb,QAAQ,EAAE,MAAM,EAAE,CAAA;CAClB;AAED,wBAAgB,YAAY,CAAC,QAAQ,EAAE,MAAM,EAAE,EAAE,YAAY,EAAE,WAAW,EAAE,GAAG,MAAM,EAAE,CAyBtF"}

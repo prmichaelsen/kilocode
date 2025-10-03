@@ -1,18 +1,22 @@
+import dotenv from "dotenv"
 import { SimpleWebServer } from "./SimpleWebServer"
+
+// Load environment variables from .env file
+dotenv.config()
 
 // Start the server
 const server = new SimpleWebServer()
 server.start()
 
 // Graceful shutdown
-process.on("SIGTERM", () => {
+process.on("SIGTERM", async () => {
 	console.log("[WebServer] Shutting down gracefully")
-	server.stop()
+	await server.stop()
 	process.exit(0)
 })
 
-process.on("SIGINT", () => {
+process.on("SIGINT", async () => {
 	console.log("[WebServer] Shutting down gracefully")
-	server.stop()
+	await server.stop()
 	process.exit(0)
 })
