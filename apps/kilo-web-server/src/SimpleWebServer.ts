@@ -14,7 +14,6 @@ import { FirebaseService, TaskHistory } from "./services/FirebaseService"
 // Import web adapters
 import { NodeTerminalAdapter } from "./adapters/TerminalAdapter"
 import { NodeFileSystemAdapter } from "./adapters/FileSystemAdapter"
-import { WebToolExecutor } from "./adapters/ToolExecutor"
 import { FirebaseTaskStorageAdapter } from "./adapters/TaskStorageAdapter"
 
 export interface ChatMessage {
@@ -35,7 +34,6 @@ interface ClientSession {
 	kilocodeToken?: string
 	currentTask?: any // Store the current Task instance
 	messageCounter: number // Track message sequence
-	toolExecutor?: WebToolExecutor // Tool executor for handling XML commands
 	storageAdapter?: FirebaseTaskStorageAdapter // Storage adapter for conversation persistence
 }
 
@@ -329,9 +327,6 @@ export class SimpleWebServer {
 				storage: storageAdapter,
 			}
 
-			// Create tool executor for handling XML tool commands
-			const toolExecutor = new WebToolExecutor(fileSystemAdapter, terminalAdapter)
-
 			// Store storage adapter in session for reuse
 			session.storageAdapter = storageAdapter
 
@@ -343,16 +338,15 @@ export class SimpleWebServer {
 				task: userText,
 			})
 
-			// Store task and tool executor in session for continuous interaction
+			// Store task in session for continuous interaction
 			session.currentTask = task
-			session.toolExecutor = toolExecutor
 
 			// Create Firebase task history entry (if Firebase is available)
 			if (this.firebaseService) {
 				const taskHistory: TaskHistory = {
 					taskId,
 					clientId: session.id,
-					messages: [...session.messages], // Include existing messages
+					messages: Array.isArray(session.messages) ? [...session.messages] : [], // Ensure messages is always an array
 					createdAt: new Date(),
 					updatedAt: new Date(),
 					status: 'active'
@@ -394,21 +388,11 @@ export class SimpleWebServer {
 
 				let messageContent = message.text || ""
 				
-				// Check for tool commands in complete messages and execute them for display
-				// This shows tool output to the user while the main task loop handles context
-				if (!message.partial && session.toolExecutor && messageContent.includes('<')) {
-					try {
-						const toolResults = await session.toolExecutor.executeTools(messageContent)
-						if (toolResults) {
-							// Show tool results to user by appending to message content
-							messageContent += `\n\n${toolResults}`
-							console.log(`[SimpleWebServer] Executed tools for display in task ${taskId}`)
-						}
-					} catch (toolError) {
-						console.error(`[SimpleWebServer] Tool execution error:`, toolError)
-						messageContent += `\n\nTool execution error: ${toolError instanceof Error ? toolError.message : String(toolError)}`
-					}
-				}
+				// CRITICAL FIX: Remove duplicate tool execution
+				// The Task class already handles tool execution properly in its conversation loop
+				// Duplicate execution was causing tools to show output to user but not provide context to agent
+				// Now the Task class handles all tool execution and feeds results back into conversation context
+				console.log(`[SimpleWebServer] Task ${taskId} message: ${messageContent.substring(0, 100)}...`)
 
 				// Generate unique message ID for streaming
 				const messageId = `msg_${taskId}_${messageTimestamp}`
@@ -544,7 +528,22 @@ export class SimpleWebServer {
 		} catch (error) {
 			console.error("[SimpleWebServer] Error continuing task:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
-			await this.streamResponse(session, `Task continuation error: ${errorMessage}`)
+			
+			// Clean up the failed task from session
+			if (session.currentTask) {
+				try {
+					session.currentTask.abortTask()
+				} catch (abortError) {
+					console.error("[SimpleWebServer] Error aborting failed task:", abortError)
+				}
+				session.currentTask = undefined
+			}
+			
+			// Send error to client
+			this.sendToClient(session, {
+				type: "error",
+				payload: { message: `Task continuation error: ${errorMessage}` },
+			})
 		}
 	}
 
@@ -581,9 +580,6 @@ export class SimpleWebServer {
 				storage: storageAdapter,
 			}
 
-			// Create tool executor
-			const toolExecutor = new WebToolExecutor(fileSystemAdapter, terminalAdapter)
-
 			// Create Task instance with existing taskId to load conversation history
 			const task = new Task({
 				taskId: taskHistory.taskId,
@@ -592,13 +588,12 @@ export class SimpleWebServer {
 				// Don't provide task text - we're resuming, not starting fresh
 			})
 
-			// Store task and tool executor in session
+			// Store task and storage adapter in session
 			session.currentTask = task
-			session.toolExecutor = toolExecutor
 			session.storageAdapter = storageAdapter
 
-			// Load existing messages into session
-			session.messages = [...taskHistory.messages]
+			// Load existing messages into session (ensure messages is an array)
+			session.messages = Array.isArray(taskHistory.messages) ? [...taskHistory.messages] : []
 
 			// Set up task event listeners for streaming
 			this.setupTaskEventListeners(session, task, taskHistory.taskId)

@@ -35,6 +35,7 @@ export class FirebaseTaskStorageAdapter implements TaskStorageAdapter {
 			// Update the task history with the latest messages
 			const taskHistory = await this.firebaseService.getTaskHistory(taskId)
 			if (taskHistory) {
+				// Ensure we always create a proper array structure
 				taskHistory.messages = messages.map(msg => {
 					// Create the message object with all required fields
 					const chatMessage = {
@@ -59,6 +60,30 @@ export class FirebaseTaskStorageAdapter implements TaskStorageAdapter {
 				})
 				taskHistory.updatedAt = new Date()
 				await this.firebaseService.saveTaskHistory(taskHistory)
+			} else {
+				// If no task history exists, create a new one with proper array initialization
+				const newTaskHistory = {
+					taskId,
+					clientId: 'unknown', // We don't have clientId in this context
+					messages: messages.map(msg => ({
+						id: `${msg.ts}`,
+						content: msg.text || "",
+						type: (msg.type === "ask" ? "user" : "assistant") as "user" | "assistant",
+						timestamp: msg.ts,
+						clineMessage: {
+							type: msg.type,
+							ts: msg.ts,
+							...(msg.text !== undefined && { text: msg.text }),
+							...(msg.ask !== undefined && { ask: msg.ask }),
+							...(msg.say !== undefined && { say: msg.say }),
+							...(msg.partial !== undefined && { partial: msg.partial }),
+						}
+					})),
+					createdAt: new Date(),
+					updatedAt: new Date(),
+					status: 'active' as const
+				}
+				await this.firebaseService.saveTaskHistory(newTaskHistory)
 			}
 		} catch (error) {
 			console.error(`[FirebaseTaskStorageAdapter] Failed to save Cline messages for task ${taskId}:`, error)
@@ -70,8 +95,11 @@ export class FirebaseTaskStorageAdapter implements TaskStorageAdapter {
 		try {
 			const taskHistory = await this.firebaseService.getTaskHistory(taskId)
 			if (taskHistory && taskHistory.messages) {
+				// Ensure messages is an array before processing
+				const messages = Array.isArray(taskHistory.messages) ? taskHistory.messages : []
+				
 				// Extract ClineMessage objects from stored messages
-				return taskHistory.messages
+				return messages
 					.map(msg => (msg as any).clineMessage)
 					.filter(msg => msg) // Filter out any null/undefined messages
 			}

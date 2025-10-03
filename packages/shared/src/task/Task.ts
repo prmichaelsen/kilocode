@@ -143,7 +143,8 @@ export class Task extends EventEmitter<TaskEvents> {
 		partial?: boolean,
 	): Promise<{ response: ClineAskResponse; text?: string; images?: string[] }> {
 		if (this.abort) {
-			throw new Error(`Task ${this.taskId} aborted`)
+			console.warn(`[Task] Attempted to ask question on aborted task ${this.taskId}`)
+			return { response: "noButtonClicked" } // Return gracefully instead of throwing
 		}
 
 		const askTs = Date.now()
@@ -179,7 +180,8 @@ export class Task extends EventEmitter<TaskEvents> {
 
 	async say(type: ClineSay, text?: string, images?: string[], partial?: boolean): Promise<void> {
 		if (this.abort) {
-			throw new Error(`Task ${this.taskId} aborted`)
+			console.warn(`[Task] Attempted to say message on aborted task ${this.taskId}`)
+			return // Return gracefully instead of throwing
 		}
 
 		const sayTs = Date.now()
@@ -210,7 +212,8 @@ export class Task extends EventEmitter<TaskEvents> {
 	// Method to continue an existing conversation with a new user message
 	public async continueConversation(text: string, images?: string[]): Promise<void> {
 		if (this.abort) {
-			throw new Error(`Task ${this.taskId} aborted`)
+			console.warn(`[Task] Attempted to continue conversation on aborted task ${this.taskId}`)
+			return // Return gracefully instead of throwing
 		}
 
 		console.log(`[Task] Continuing conversation for task ${this.taskId}`)
@@ -259,7 +262,8 @@ export class Task extends EventEmitter<TaskEvents> {
 			this.conversationInitialized = true
 		}
 
-		await this.say("text", task, images)
+		// Don't add the user message here - it's already added by the web server
+		// This prevents duplication of the first user message
 		this.isInitialized = true
 
 		let imageBlocks: Anthropic.ImageBlockParam[] = []
@@ -307,7 +311,8 @@ export class Task extends EventEmitter<TaskEvents> {
 		userContent: Anthropic.Messages.ContentBlockParam[],
 	): Promise<{ didEndLoop: boolean; nextUserContent?: Anthropic.Messages.ContentBlockParam[] }> {
 		if (this.abort) {
-			throw new Error(`Task ${this.taskId} aborted`)
+			console.warn(`[Task] Attempted to make requests on aborted task ${this.taskId}`)
+			return { didEndLoop: true } // End gracefully instead of throwing
 		}
 
 		const finalUserContent = [...userContent]
@@ -547,6 +552,22 @@ export class Task extends EventEmitter<TaskEvents> {
 					return `[list_files Result]\n\nFiles in ${this.workspacePath}:\n${files.join('\n')}`
 				} catch (error) {
 					return `[list_files Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+				}
+			}
+
+			if (message.includes('<read_file>')) {
+				// Extract file path from XML tags
+				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
+				if (pathMatch && pathMatch[1] && this.fileSystem) {
+					try {
+						const filePath = pathMatch[1].trim()
+						const content = await this.fileSystem.readFile(filePath)
+						// Add line numbers like the main extension does
+						const numberedContent = content.split('\n').map((line, index) => `${index + 1} | ${line}`).join('\n')
+						return `[read_file Result]\n\nFile: ${filePath}\n\n${numberedContent}`
+					} catch (error) {
+						return `[read_file Result]\n\nError reading file ${pathMatch[1]}: ${error instanceof Error ? error.message : String(error)}`
+					}
 				}
 			}
 
