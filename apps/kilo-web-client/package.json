@@ -144,5 +144,8 @@
 		"presets": [
 			"react-app"
 		]
+	},
+	"devDependencies": {
+		"autoprefixer": "^10.4.21"
 	}
 }

@@ -36,7 +36,21 @@ interface TaskState {
 	secondaryButtonText?: string
 }
 
-const WS_URL = process.env.REACT_APP_WS_URL || "ws://localhost:3001/ws"
+// Dynamic WebSocket URL based on current host
+const getWebSocketUrl = () => {
+	if (process.env.REACT_APP_WS_URL) {
+		return process.env.REACT_APP_WS_URL
+	}
+	
+	// Use current host for WebSocket connection
+	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+	const host = window.location.hostname
+	const port = window.location.hostname === 'localhost' ? '3001' : '3001'
+	
+	return `${protocol}//${host}:${port}/ws`
+}
+
+const WS_URL = getWebSocketUrl()
 
 export default function App() {
 	const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -247,15 +261,15 @@ export default function App() {
 	const getConnectionStatusColor = () => {
 		switch (connectionStatus) {
 			case "connected":
-				return "text-green-600"
+				return "text-green-400"
 			case "connecting":
-				return "text-yellow-600"
+				return "text-yellow-400"
 			case "disconnected":
-				return "text-red-600"
+				return "text-red-400"
 			case "error":
-				return "text-red-800"
+				return "text-red-300"
 			default:
-				return "text-gray-600"
+				return "text-gray-400"
 		}
 	}
 
@@ -275,30 +289,30 @@ export default function App() {
 	}
 
 	return (
-		<div className="flex flex-col h-screen max-w-4xl mx-auto bg-gray-50">
+		<div className="flex flex-col h-screen bg-gray-900 text-gray-100">
 			{/* Header */}
-			<div className="bg-white border-b border-gray-200 p-4">
+			<div className="bg-gray-800 border-b border-gray-700 p-4">
 				<div className="flex justify-between items-center">
-					<h1 className="text-xl font-semibold text-gray-800">Kilo Code Web POC</h1>
+					<h1 className="text-xl font-semibold text-gray-100">Kilo Code Web POC</h1>
 					<div className="flex items-center gap-2">
-						<div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500" : "bg-red-500"}`}></div>
+						<div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"}`}></div>
 						<span className={`text-sm ${getConnectionStatusColor()}`}>{getConnectionStatusText()}</span>
-						{clientId && <span className="text-xs text-gray-500">ID: {clientId.slice(-8)}</span>}
+						{clientId && <span className="text-xs text-gray-400">ID: {clientId.slice(-8)}</span>}
 					</div>
 				</div>
 
 				{taskState.taskId && (
-					<div className="mt-2 text-sm text-gray-600">
+					<div className="mt-2 text-sm text-gray-300">
 						Task: {taskState.taskId} | Status: {taskState.status}
-						{taskState.isStreaming && <span className="text-blue-600"> • Streaming...</span>}
+						{taskState.isStreaming && <span className="text-blue-400"> • Streaming...</span>}
 					</div>
 				)}
 			</div>
 
 			{/* Messages */}
-			<div className="flex-1 overflow-y-auto p-4 space-y-4">
+			<div className="flex-1 overflow-y-auto p-0 md:p-4 space-y-4">
 				{messages.length === 0 && (
-					<div className="text-center text-gray-500 mt-8">
+					<div className="text-center text-gray-400 mt-8">
 						<h2 className="text-lg font-medium mb-2">Welcome to Kilo Code Web</h2>
 						<p>Start a conversation with the AI agent by typing a message below.</p>
 						<p className="text-sm mt-2">Try: "List the files in the current project"</p>
@@ -308,16 +322,16 @@ export default function App() {
 				{messages.map((message) => (
 					<div
 						key={message.id}
-						className={`flex ${message.type === "user" ? "justify-end" : "justify-start"}`}>
+						className={`${message.type === "user" ? "flex justify-end" : "w-full"}`}>
 						<div
-							className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+							className={`px-2 md:px-4 py-3 ${
 								message.type === "user"
-									? "bg-blue-500 text-white"
+									? "bg-blue-600 text-white max-w-xs lg:max-w-md rounded-lg rounded md:rounded-lg"
 									: message.type === "error"
-										? "bg-red-100 text-red-800 border border-red-200"
-										: "bg-white text-gray-800 border border-gray-200"
+										? "bg-red-900 text-red-200 border border-red-700 w-full rounded md:rounded-lg"
+										: "bg-gray-800 text-gray-100 border border-gray-700 w-full rounded md:rounded-lg"
 							}`}>
-							<div className="text-xs text-opacity-70 mb-1">
+							<div className="text-xs opacity-70 mb-2">
 								{message.type === "user" ? "You" : "Assistant"}
 								{message.ask && ` (${message.ask})`}
 								{message.say && ` (${message.say})`}
@@ -330,13 +344,13 @@ export default function App() {
 											const isInline = !className?.includes("language-")
 											return isInline ? (
 												<code
-													className="bg-gray-100 px-1 py-0.5 rounded text-xs font-mono"
+													className="bg-gray-700 text-gray-200 px-1 py-0.5 rounded text-xs font-mono"
 													{...props}>
 													{children}
 												</code>
 											) : (
-												<pre className="bg-gray-100 p-3 rounded-lg overflow-x-auto mt-2 mb-2">
-													<code className="text-xs font-mono" {...props}>
+												<pre className="bg-gray-900 border border-gray-600 p-3 rounded-lg overflow-x-auto mt-2 mb-2">
+													<code className="text-xs font-mono text-gray-200" {...props}>
 														{children}
 													</code>
 												</pre>
@@ -344,17 +358,17 @@ export default function App() {
 										},
 										p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
 										ul: ({ children }) => (
-											<ul className="list-disc list-inside mb-2">{children}</ul>
+											<ul className="list-disc list-inside mb-2 text-gray-200">{children}</ul>
 										),
 										ol: ({ children }) => (
-											<ol className="list-decimal list-inside mb-2">{children}</ol>
+											<ol className="list-decimal list-inside mb-2 text-gray-200">{children}</ol>
 										),
 										li: ({ children }) => <li className="mb-1">{children}</li>,
-										h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+										h1: ({ children }) => <h1 className="text-lg font-bold mb-2 text-gray-100">{children}</h1>,
 										h2: ({ children }) => (
-											<h2 className="text-md font-semibold mb-2">{children}</h2>
+											<h2 className="text-md font-semibold mb-2 text-gray-100">{children}</h2>
 										),
-										h3: ({ children }) => <h3 className="text-sm font-medium mb-1">{children}</h3>,
+										h3: ({ children }) => <h3 className="text-sm font-medium mb-1 text-gray-200">{children}</h3>,
 									}}>
 									{message.content}
 								</ReactMarkdown>
@@ -366,12 +380,12 @@ export default function App() {
 
 			{/* Tool Approval Buttons */}
 			{taskState.enableButtons && (taskState.primaryButtonText || taskState.secondaryButtonText) && (
-				<div className="border-t border-gray-200 bg-white p-4">
+				<div className="border-t border-gray-700 bg-gray-800 p-3 md:p-4">
 					<div className="flex gap-2 justify-center">
 						{taskState.primaryButtonText && (
 							<button
 								onClick={() => handleApproval(true)}
-								className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50"
+								className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
 								disabled={!isConnected}>
 								{taskState.primaryButtonText}
 							</button>
@@ -379,7 +393,7 @@ export default function App() {
 						{taskState.secondaryButtonText && (
 							<button
 								onClick={() => handleApproval(false)}
-								className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50"
+								className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
 								disabled={!isConnected}>
 								{taskState.secondaryButtonText}
 							</button>
@@ -389,26 +403,26 @@ export default function App() {
 			)}
 
 			{/* Input */}
-			<div className="border-t border-gray-200 bg-white p-4">
+			<div className="border-t border-gray-700 bg-gray-800 p-3 md:p-4">
 				<div className="flex gap-2">
 					<input
 						type="text"
 						value={input}
 						onChange={(e) => setInput(e.target.value)}
 						onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-						placeholder={taskState.status === "idle" ? "Start a conversation..." : "Send a message..."}
-						className="flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+						placeholder={taskState.status === "idle" ? "Send a message..." : "Send a message..."}
+						className="flex-1 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
 						disabled={!isConnected || taskState.isStreaming}
 					/>
 					<button
 						onClick={sendMessage}
 						disabled={!isConnected || !input.trim() || taskState.isStreaming}
-						className="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">
+						className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
 						{taskState.isStreaming ? "Sending..." : "Send"}
 					</button>
 				</div>
 
-				<div className="flex justify-between items-center mt-2 text-xs text-gray-500">
+				<div className="flex justify-between items-center mt-2 text-xs text-gray-400">
 					<span>
 						Status: {getConnectionStatusText()}
 						{taskState.status !== "idle" && ` • Task: ${taskState.status}`}

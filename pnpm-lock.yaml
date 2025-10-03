@@ -267,6 +267,10 @@ importers:
       workbox-webpack-plugin:
         specifier: ^6.4.1
         version: 6.6.0(@types/babel__core@7.20.5)(webpack@5.101.3(@swc/core@1.13.5)(esbuild@0.25.9))
+    devDependencies:
+      autoprefixer:
+        specifier: ^10.4.21
+        version: 10.4.21(postcss@8.5.4)
 
   apps/kilo-web-server:
     dependencies:
@@ -26971,7 +26975,7 @@ snapshots:
   autoprefixer@10.4.21(postcss@8.5.4):
     dependencies:
       browserslist: 4.25.4
-      caniuse-lite: 1.0.30001718
+      caniuse-lite: 1.0.30001737
       fraction.js: 4.3.7
       normalize-range: 0.1.2
       picocolors: 1.1.1

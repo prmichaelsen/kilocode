@@ -38,7 +38,15 @@ export class SimpleWebServer {
 	private setupExpress() {
 		this.app.use(
 			cors({
-				origin: ["http://localhost:3000", "http://localhost:3001"],
+				origin: [
+					"http://localhost:3000",
+					"http://localhost:3001",
+					"http://localhost:8080",
+					"http://137.184.37.88:3000",
+					"http://137.184.37.88:8080",
+					"https://137.184.37.88:3000",
+					"https://137.184.37.88:8080"
+				],
 				credentials: true,
 			}),
 		)
@@ -554,10 +562,10 @@ For this web interface demonstration, respond naturally and helpfully to the use
 	}
 
 	start(port: number = 3001) {
-		this.server.listen(port, () => {
+		this.server.listen(port, '0.0.0.0', () => {
 			console.log(`[SimpleWebServer] Server running on port ${port}`)
-			console.log(`[SimpleWebServer] WebSocket endpoint: ws://localhost:${port}/ws`)
-			console.log(`[SimpleWebServer] Health check: http://localhost:${port}/health`)
+			console.log(`[SimpleWebServer] WebSocket endpoint: ws://0.0.0.0:${port}/ws`)
+			console.log(`[SimpleWebServer] Health check: http://0.0.0.0:${port}/health`)
 		})
 	}
 
