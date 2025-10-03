@@ -111,11 +111,10 @@ export class FirebaseService {
 		}
 	}
 
-	async getClientTaskHistory(clientId: string, limit: number = 50): Promise<TaskHistory[]> {
+	async getGlobalTaskHistory(limit: number = 50): Promise<TaskHistory[]> {
 		try {
 			const snapshot = await this.db
 				.collection(FirebaseCollections.TASK_HISTORY)
-				.where('clientId', '==', clientId)
 				.orderBy('updatedAt', 'desc')
 				.limit(limit)
 				.get()
@@ -129,9 +128,15 @@ export class FirebaseService {
 				} as TaskHistory
 			})
 		} catch (error) {
-			console.error('[FirebaseService] Error getting client task history:', error)
+			console.error('[FirebaseService] Error getting global task history:', error)
 			throw error
 		}
+	}
+
+	// Keep the client-specific method for backward compatibility
+	async getClientTaskHistory(clientId: string, limit: number = 50): Promise<TaskHistory[]> {
+		// For now, return global history regardless of clientId
+		return this.getGlobalTaskHistory(limit)
 	}
 
 	async updateTaskStatus(taskId: string, status: TaskHistory['status']): Promise<void> {

@@ -43,6 +43,34 @@ export interface CancelTaskMessage extends BaseWebSocketMessage {
 	payload: {}
 }
 
+export interface GetTaskHistoryMessage extends BaseWebSocketMessage {
+	type: "get_task_history"
+	payload: {
+		limit?: number
+		offset?: number
+		filters?: {
+			status?: string[]
+			dateRange?: { start: Date; end: Date }
+			search?: string
+		}
+	}
+}
+
+export interface ResumeTaskMessage extends BaseWebSocketMessage {
+	type: "resume_task"
+	payload: {
+		taskId: string
+		mode: "continue" | "new_with_context" | "view_only"
+	}
+}
+
+export interface DeleteTaskMessage extends BaseWebSocketMessage {
+	type: "delete_task"
+	payload: {
+		taskId: string
+	}
+}
+
 // Server to Client Messages
 export interface TaskCreatedMessage extends BaseWebSocketMessage {
 	type: "task_created"
@@ -110,6 +138,37 @@ export interface ConnectionStatusMessage extends BaseWebSocketMessage {
 	}
 }
 
+export interface TaskHistoryResponseMessage extends BaseWebSocketMessage {
+	type: "task_history_response"
+	payload: {
+		success: boolean
+		tasks?: any[] // TaskHistory[] - using any to avoid circular dependency
+		totalCount?: number
+		hasMore?: boolean
+		error?: string
+		requestId?: string
+	}
+}
+
+export interface TaskResumedMessage extends BaseWebSocketMessage {
+	type: "task_resumed"
+	payload: {
+		taskId: string
+		messages: any[] // ChatMessage[] - using any to avoid circular dependency
+		status: string
+	}
+}
+
+export interface TaskDeletedResponseMessage extends BaseWebSocketMessage {
+	type: "task_deleted_response"
+	payload: {
+		success: boolean
+		taskId?: string
+		error?: string
+		requestId?: string
+	}
+}
+
 // Union types for message discrimination
 export type ClientMessage =
 	| NewTaskMessage
@@ -117,6 +176,9 @@ export type ClientMessage =
 	| AskResponseMessage
 	| TerminalOperationMessage
 	| CancelTaskMessage
+	| GetTaskHistoryMessage
+	| ResumeTaskMessage
+	| DeleteTaskMessage
 
 export type ServerMessage =
 	| TaskCreatedMessage
@@ -125,6 +187,9 @@ export type ServerMessage =
 	| ErrorMessage
 	| ToolExecutionMessage
 	| ConnectionStatusMessage
+	| TaskHistoryResponseMessage
+	| TaskResumedMessage
+	| TaskDeletedResponseMessage
 
 export type WebSocketMessage = ClientMessage | ServerMessage
 

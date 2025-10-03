@@ -178,8 +178,8 @@ export class SimpleWebServer {
 			case "get_task_history":
 				await this.handleGetTaskHistory(session, message.payload)
 				break
-			case "get_task":
-				await this.handleGetTask(session, message.payload)
+			case "resume_task":
+				await this.handleResumeTask(session, message.payload)
 				break
 			case "delete_task":
 				await this.handleDeleteTask(session, message.payload)
@@ -435,10 +435,13 @@ export class SimpleWebServer {
 				throw new Error("No current task to continue")
 			}
 
-			// Send the user message to the existing task
-			await session.currentTask.setMessageResponse(userText)
+			// For resumed tasks, we need to create a new Task instance or handle differently
+			// Since we're using the shared Task class, we need to create a proper task
+			// For now, let's create a new task with the user's message
+			const taskId = session.currentTask.taskId || `task_${Date.now()}_${session.id}`
+			await this.createTaskForSession(session, userText, taskId)
 			
-			console.log(`[SimpleWebServer] Continued task ${session.currentTask.taskId} for session ${session.id}`)
+			console.log(`[SimpleWebServer] Continued task ${taskId} for session ${session.id}`)
 		} catch (error) {
 			console.error("[SimpleWebServer] Error continuing task:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -748,27 +751,46 @@ export class SimpleWebServer {
 		}
 	}
 
-	private async handleGetTask(session: ClientSession, payload: any) {
+	private async handleResumeTask(session: ClientSession, payload: any) {
 		try {
-			const { taskId } = payload
-			const taskHistory = await this.firebaseService.getTaskHistory(taskId)
+			const { taskId, mode } = payload
 			
+			// Get task history from Firebase
+			if (!this.firebaseService) {
+				throw new Error("Firebase service not available")
+			}
+			
+			const taskHistory = await this.firebaseService.getTaskHistory(taskId)
+			if (!taskHistory) {
+				throw new Error(`Task ${taskId} not found`)
+			}
+
+			// Load the task messages into current session
+			session.messages = [...taskHistory.messages]
+			
+			// Set current task ID for continuation
+			if (mode === "continue") {
+				// Resume the existing task - client will handle setting currentTaskId
+				session.currentTask = { taskId } // Simplified task reference
+			}
+
+			// Send task resumed response
 			this.sendToClient(session, {
-				type: "task_response",
+				type: "task_resumed",
 				payload: {
-					success: true,
-					task: taskHistory,
-					requestId: payload.requestId,
+					taskId,
+					messages: taskHistory.messages,
+					status: taskHistory.status,
 				},
 			})
+
+			console.log(`[SimpleWebServer] Task ${taskId} resumed for session ${session.id} in ${mode} mode`)
 		} catch (error) {
-			console.error("[SimpleWebServer] Error fetching task:", error)
+			console.error("[SimpleWebServer] Error resuming task:", error)
 			this.sendToClient(session, {
-				type: "task_response",
+				type: "error",
 				payload: {
-					success: false,
-					error: error instanceof Error ? error.message : String(error),
-					requestId: payload.requestId,
+					message: error instanceof Error ? error.message : String(error),
 				},
 			})
 		}

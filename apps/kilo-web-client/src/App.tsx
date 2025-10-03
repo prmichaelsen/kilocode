@@ -70,6 +70,9 @@ export default function App() {
 	const [clientId, setClientId] = useState<string>("")
 	const [messageCounter, setMessageCounter] = useState(0)
 	const [activeStreamIds, setActiveStreamIds] = useState<Set<string>>(new Set())
+	const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+	const [taskHistory, setTaskHistory] = useState<any[]>([])
+	const [historyLoading, setHistoryLoading] = useState(false)
 
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -146,6 +149,10 @@ export default function App() {
 
 		if (isConnectionStatusMessage(message)) {
 			setClientId(message.payload.clientId)
+			// Automatically load task history when connected
+			setTimeout(() => {
+				loadTaskHistory()
+			}, 500) // Small delay to ensure connection is stable
 			return
 		}
 
@@ -252,6 +259,44 @@ export default function App() {
 			return
 		}
 
+		// Handle task history response
+		if ((message as any).type === "task_history_response") {
+			const payload = (message as any).payload
+			setHistoryLoading(false)
+			if (payload.success) {
+				setTaskHistory(payload.tasks || [])
+			} else {
+				console.error("[App] Failed to load task history:", payload.error)
+			}
+			return
+		}
+
+		// Handle task resumed
+		if ((message as any).type === "task_resumed") {
+			const payload = (message as any).payload
+			// Load the resumed task messages
+			setMessages(payload.messages || [])
+			setCurrentTaskId(payload.taskId)
+			setTaskState((prev) => ({
+				...prev,
+				taskId: payload.taskId,
+				status: payload.status === "completed" ? "idle" : "idle",
+			}))
+			return
+		}
+
+		// Handle task deleted response
+		if ((message as any).type === "task_deleted_response") {
+			const payload = (message as any).payload
+			if (payload.success) {
+				// Remove task from history
+				setTaskHistory((prev) => prev.filter((task) => task.taskId !== payload.taskId))
+			} else {
+				console.error("[App] Failed to delete task:", payload.error)
+			}
+			return
+		}
+
 		console.warn("[App] Unhandled message type:", (message as any).type)
 	}
 
@@ -308,6 +353,55 @@ export default function App() {
 		wsRef.current.send(JSON.stringify(message))
 	}
 
+	const loadTaskHistory = () => {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+			return
+		}
+
+		setHistoryLoading(true)
+		const message = {
+			type: "get_task_history",
+			payload: { limit: 20 },
+			requestId: clientId,
+			timestamp: Date.now(),
+		}
+
+		wsRef.current.send(JSON.stringify(message))
+	}
+
+	const resumeTask = (taskId: string) => {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+			return
+		}
+
+		const message = {
+			type: "resume_task",
+			payload: {
+				taskId,
+				mode: "continue"
+			},
+			requestId: clientId,
+			timestamp: Date.now(),
+		}
+
+		wsRef.current.send(JSON.stringify(message))
+	}
+
+	const deleteTask = (taskId: string) => {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+			return
+		}
+
+		const message = {
+			type: "delete_task",
+			payload: { taskId },
+			requestId: clientId,
+			timestamp: Date.now(),
+		}
+
+		wsRef.current.send(JSON.stringify(message))
+	}
+
 	const getConnectionStatusColor = () => {
 		switch (connectionStatus) {
 			case "connected":
@@ -339,25 +433,100 @@ export default function App() {
 	}
 
 	return (
-		<div className="flex flex-col h-screen bg-gray-900 text-gray-100">
-			{/* Header */}
-			<div className="bg-gray-800 border-b border-gray-700 p-4">
-				<div className="flex justify-between items-center">
-					<h1 className="text-xl font-semibold text-gray-100">Kilo Code Web POC</h1>
-					<div className="flex items-center gap-2">
-						<div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"}`}></div>
-						<span className={`text-sm ${getConnectionStatusColor()}`}>{getConnectionStatusText()}</span>
-						{clientId && <span className="text-xs text-gray-400">ID: {clientId.slice(-8)}</span>}
+		<div className="flex h-screen bg-gray-900 text-gray-100">
+			{/* Task History Sidebar */}
+			{isHistoryOpen && (
+				<div className="w-[90vw] md:w-80 bg-gray-800 border-r border-gray-700 flex flex-col">
+					{/* History Header */}
+					<div className="p-4 border-b border-gray-700">
+						<div className="flex justify-between items-center">
+							<h2 className="text-lg font-semibold">Task History</h2>
+							<button
+								onClick={() => setIsHistoryOpen(false)}
+								className="text-gray-400 hover:text-gray-200">
+								✕
+							</button>
+						</div>
+						<button
+							onClick={loadTaskHistory}
+							disabled={historyLoading}
+							className="mt-2 w-full px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+							{historyLoading ? "Loading..." : "Refresh History"}
+						</button>
+					</div>
+
+					{/* History List */}
+					<div className="flex-1 overflow-y-auto p-2">
+						{taskHistory.length === 0 ? (
+							<div className="text-center text-gray-400 mt-8">
+								<p>No task history yet</p>
+								<p className="text-sm mt-2">Start a conversation to see your tasks here</p>
+							</div>
+						) : (
+							taskHistory.map((task) => (
+								<div
+									key={task.taskId}
+									className="mb-2 p-3 bg-gray-700 rounded-lg hover:bg-gray-600 cursor-pointer"
+									onClick={() => resumeTask(task.taskId)}>
+									<div className="flex justify-between items-start">
+										<div className="flex-1">
+											<h3 className="text-sm font-medium text-gray-100 truncate">
+												{task.messages?.[0]?.content?.slice(0, 50) || "Untitled Task"}...
+											</h3>
+											<p className="text-xs text-gray-400 mt-1">
+												{new Date(task.updatedAt).toLocaleDateString()} • {task.messages?.length || 0} messages
+											</p>
+											<span className={`inline-block px-2 py-1 text-xs rounded mt-2 ${
+												task.status === "completed" ? "bg-green-600 text-green-100" :
+												task.status === "error" ? "bg-red-600 text-red-100" :
+												"bg-blue-600 text-blue-100"
+											}`}>
+												{task.status}
+											</span>
+										</div>
+										<button
+											onClick={(e) => {
+												e.stopPropagation()
+												deleteTask(task.taskId)
+											}}
+											className="text-gray-400 hover:text-red-400 ml-2">
+											🗑️
+										</button>
+									</div>
+								</div>
+							))
+						)}
 					</div>
 				</div>
+			)}
 
-				{taskState.taskId && (
-					<div className="mt-2 text-sm text-gray-300">
-						Task: {taskState.taskId} | Status: {taskState.status}
-						{taskState.isStreaming && <span className="text-blue-400"> • Streaming...</span>}
+			{/* Main Chat Area */}
+			<div className="flex flex-col flex-1">
+				{/* Header */}
+				<div className="bg-gray-800 border-b border-gray-700 p-4">
+					<div className="flex justify-between items-center">
+						<div className="flex items-center gap-3">
+							<button
+								onClick={() => setIsHistoryOpen(!isHistoryOpen)}
+								className="text-gray-400 hover:text-gray-200">
+								📋
+							</button>
+							<h1 className="text-xl font-semibold text-gray-100">Kilo Code Web POC</h1>
+						</div>
+						<div className="flex items-center gap-2">
+							<div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"}`}></div>
+							<span className={`text-sm ${getConnectionStatusColor()}`}>{getConnectionStatusText()}</span>
+							{clientId && <span className="text-xs text-gray-400">ID: {clientId.slice(-8)}</span>}
+						</div>
 					</div>
-				)}
-			</div>
+
+					{taskState.taskId && (
+						<div className="mt-2 text-sm text-gray-300">
+							Task: {taskState.taskId} | Status: {taskState.status}
+							{taskState.isStreaming && <span className="text-blue-400"> • Streaming...</span>}
+						</div>
+					)}
+				</div>
 
 			{/* Messages */}
 			<div className="flex-1 overflow-y-auto p-0 md:p-4 space-y-4">
@@ -479,6 +648,7 @@ export default function App() {
 					</span>
 					<span>Press Enter to send, Shift+Enter for new line</span>
 				</div>
+			</div>
 			</div>
 		</div>
 	)
