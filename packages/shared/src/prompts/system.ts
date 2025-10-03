@@ -5,6 +5,7 @@ import { getWriteToFileDescription } from './tools/write-to-file.js'
 import { getListFilesDescription } from './tools/list-files.js'
 import { getAttemptCompletionDescription } from './tools/attempt-completion.js'
 import { getSearchAndReplaceDescription } from './tools/search-and-replace.js'
+import { getChangeWorkingDirectoryDescription } from './tools/change-working-directory.js'
 
 interface ToolArgs {
 	cwd: string
@@ -51,6 +52,8 @@ Always use the actual tool name as the XML tag name for proper parsing and execu
 
 ${getExecuteCommandDescription(toolArgs)}
 
+${getChangeWorkingDirectoryDescription(toolArgs)}
+
 ${getSearchAndReplaceDescription(toolArgs)}
 
 ${getReadFileDescription(toolArgs)}
@@ -68,6 +71,7 @@ CAPABILITIES
 - You have access to tools that let you execute CLI commands, list files, view source code, read and write files, and much more. These tools help you effectively accomplish a wide range of tasks.
 - When the user initially gives you a task, you should break it down into steps and use the appropriate tools to accomplish each step.
 - You can use the execute_command tool to run commands on the user's computer whenever you feel it can help accomplish the user's task.
+- You can use the change_working_directory tool to navigate to different directories and change the context for all subsequent operations.
 - You can use the read_file tool to examine the contents of files.
 - You can use the write_to_file tool to create new files or completely rewrite existing files.
 - You can use the list_files tool to see what files and directories are available.`

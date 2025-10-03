@@ -330,6 +330,34 @@ export class FirebaseService {
 			return []
 		}
 	}
+
+	async saveWorkingDirectory(taskId: string, workingDirectory: string): Promise<void> {
+		try {
+			const sanitizedData = prepareForFirestore({
+				workingDirectory,
+				updatedAt: admin.firestore.Timestamp.now(),
+			}, 'working directory save')
+
+			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId).update(sanitizedData)
+		} catch (error) {
+			console.error('[FirebaseService] Error saving working directory:', error)
+			throw error
+		}
+	}
+
+	async loadWorkingDirectory(taskId: string): Promise<string | null> {
+		try {
+			const doc = await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId).get()
+			if (doc.exists) {
+				const data = doc.data()
+				return data?.workingDirectory || null
+			}
+			return null
+		} catch (error) {
+			console.error('[FirebaseService] Error loading working directory:', error)
+			return null
+		}
+	}
 }
 
 export { TaskHistory }

@@ -89,4 +89,22 @@ export class FirebaseTaskStorageAdapter implements TaskStorageAdapter {
 			return []
 		}
 	}
+
+	async saveWorkingDirectory(taskId: string, workingDirectory: string): Promise<void> {
+		try {
+			await this.firebaseService.saveWorkingDirectory(taskId, workingDirectory)
+		} catch (error) {
+			console.error(`[FirebaseTaskStorageAdapter] Failed to save working directory for task ${taskId}:`, error)
+			// Don't throw - allow task to continue even if storage fails
+		}
+	}
+
+	async loadWorkingDirectory(taskId: string): Promise<string | null> {
+		try {
+			return await this.firebaseService.loadWorkingDirectory(taskId)
+		} catch (error) {
+			console.error(`[FirebaseTaskStorageAdapter] Failed to load working directory for task ${taskId}:`, error)
+			return null
+		}
+	}
 }

@@ -16,6 +16,8 @@ export interface TaskStorageAdapter {
 	loadApiMessages(taskId: string): Promise<any[]>
 	saveClineMessages(taskId: string, messages: ClineMessage[]): Promise<void>
 	loadClineMessages(taskId: string): Promise<ClineMessage[]>
+	saveWorkingDirectory?(taskId: string, workingDirectory: string): Promise<void>
+	loadWorkingDirectory?(taskId: string): Promise<string | null>
 }
 
 export interface FileSystemAdapter {

@@ -1,5 +1,6 @@
 import { EventEmitter } from "events"
 import crypto from "crypto"
+import * as path from "path"
 import { Anthropic } from "@anthropic-ai/sdk"
 import { serializeError } from "serialize-error"
 import delay from "delay"
@@ -37,6 +38,9 @@ export class Task extends EventEmitter<TaskEvents> {
 	// State
 	abort: boolean = false
 	isInitialized = false
+	
+	// Working directory management
+	private currentWorkingDirectory: string
 
 	// Messages - persistent conversation history
 	clineMessages: ClineMessage[] = []
@@ -65,6 +69,7 @@ export class Task extends EventEmitter<TaskEvents> {
 		this.dependencies = options.dependencies
 		this.workspacePath = options.dependencies.workspacePath
 		this.globalStoragePath = options.dependencies.globalStoragePath
+		this.currentWorkingDirectory = this.workspacePath // Initialize to workspace path
 
 		// Set up file system adapter
 		this.fileSystem = options.dependencies.fileSystem || this.createDefaultFileSystem()
@@ -72,7 +77,7 @@ export class Task extends EventEmitter<TaskEvents> {
 		this.apiConfiguration = options.apiConfiguration
 		this.api = buildApiHandler(options.apiConfiguration)
 
-		// Load existing conversation history if available
+		// Load existing conversation history and working directory if available
 		this.initializeConversationHistory().then(() => {
 			if (options.task || options.images) {
 				this.startTask(options.task, options.images)
@@ -88,7 +93,8 @@ export class Task extends EventEmitter<TaskEvents> {
 	private async initializeConversationHistory(): Promise<void> {
 		await Promise.all([
 			this.loadApiConversationHistory(),
-			this.loadClineMessages()
+			this.loadClineMessages(),
+			this.loadWorkingDirectory()
 		])
 		this.conversationInitialized = true
 	}
@@ -540,6 +546,7 @@ export class Task extends EventEmitter<TaskEvents> {
 			/<apply_diff>/,
 			/<search_files>/,
 			/<search_and_replace>/,
+			/<change_working_directory>/,
 			/<attempt_completion>/,
 		]
 		return toolPatterns.some((pattern) => pattern.test(message))
@@ -551,7 +558,59 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	public get cwd() {
-		return this.workspacePath
+		return this.currentWorkingDirectory
+	}
+	
+	// Working directory management methods
+	private async loadWorkingDirectory(): Promise<void> {
+		try {
+			if (this.dependencies.storage?.loadWorkingDirectory) {
+				const savedWorkingDirectory = await this.dependencies.storage.loadWorkingDirectory(this.taskId)
+				if (savedWorkingDirectory) {
+					this.currentWorkingDirectory = savedWorkingDirectory
+					console.log(`[Task] Loaded working directory: ${savedWorkingDirectory}`)
+				}
+			}
+		} catch (error) {
+			console.error(`[Task] Failed to load working directory for ${this.taskId}:`, error)
+			// Continue with default working directory if loading fails
+		}
+	}
+	
+	private async saveWorkingDirectory(): Promise<void> {
+		try {
+			if (this.dependencies.storage?.saveWorkingDirectory) {
+				await this.dependencies.storage.saveWorkingDirectory(this.taskId, this.currentWorkingDirectory)
+			}
+		} catch (error) {
+			console.error(`[Task] Failed to save working directory for ${this.taskId}:`, error)
+			// Don't throw - continue task execution even if storage fails
+		}
+	}
+	
+	private async changeWorkingDirectory(newDirectory: string): Promise<string> {
+		try {
+			// Resolve the new directory path
+			const resolvedPath = newDirectory.startsWith('/')
+				? newDirectory
+				: `${this.currentWorkingDirectory}/${newDirectory}`
+			
+			// Verify the directory exists
+			const exists = await this.fileSystem.exists(resolvedPath)
+			if (!exists) {
+				throw new Error(`Directory does not exist: ${resolvedPath}`)
+			}
+			
+			// Update the current working directory
+			this.currentWorkingDirectory = resolvedPath
+			
+			// Save to storage
+			await this.saveWorkingDirectory()
+			
+			return resolvedPath
+		} catch (error) {
+			throw new Error(`Failed to change working directory: ${error instanceof Error ? error.message : String(error)}`)
+		}
 	}
 
 	// Execute tools found in assistant message and return results
@@ -566,8 +625,8 @@ export class Task extends EventEmitter<TaskEvents> {
 			// Simple tool execution - this should be replaced with proper tool executor
 			if (message.includes('<list_files>')) {
 				try {
-					const files = await this.fileSystem.readDirectory(this.workspacePath)
-					return `[list_files Result]\n\nFiles in ${this.workspacePath}:\n${files.join('\n')}`
+					const files = await this.fileSystem.readDirectory(this.currentWorkingDirectory)
+					return `[list_files Result]\n\nFiles in ${this.currentWorkingDirectory}:\n${files.join('\n')}`
 				} catch (error) {
 					return `[list_files Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
 				}
@@ -579,7 +638,8 @@ export class Task extends EventEmitter<TaskEvents> {
 				if (pathMatch && pathMatch[1] && this.fileSystem) {
 					try {
 						const filePath = pathMatch[1].trim()
-						const content = await this.fileSystem.readFile(filePath)
+						const resolvedPath = this.resolvePath(filePath)
+						const content = await this.fileSystem.readFile(resolvedPath)
 						// Add line numbers like the main extension does
 						const numberedContent = content.split('\n').map((line, index) => `${index + 1} | ${line}`).join('\n')
 						return `[read_file Result]\n\nFile: ${filePath}\n\n${numberedContent}`
@@ -595,7 +655,7 @@ export class Task extends EventEmitter<TaskEvents> {
 				if (commandMatch && commandMatch[1] && this.dependencies.terminalAdapter) {
 					try {
 						const command = commandMatch[1].trim()
-						const result = await this.dependencies.terminalAdapter.executeCommand(command, this.workspacePath)
+						const result = await this.dependencies.terminalAdapter.executeCommand(command, this.currentWorkingDirectory)
 						return `[execute_command Result]\n\nCommand: ${command}\nExit Code: ${result.exitCode}\n\nOutput:\n${result.stdout}\n\nError:\n${result.stderr}`
 					} catch (error) {
 						return `[execute_command Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
@@ -610,8 +670,9 @@ export class Task extends EventEmitter<TaskEvents> {
 				if (pathMatch && pathMatch[1] && contentMatch && contentMatch[1]) {
 					try {
 						const filePath = pathMatch[1].trim()
+						const resolvedPath = this.resolvePath(filePath)
 						const content = contentMatch[1].trim()
-						await this.fileSystem.writeFile(filePath, content)
+						await this.fileSystem.writeFile(resolvedPath, content)
 						return `[write_to_file Result]\n\nSuccessfully wrote to file: ${filePath}`
 					} catch (error) {
 						return `[write_to_file Result]\n\nError writing file ${pathMatch[1]}: ${error instanceof Error ? error.message : String(error)}`
@@ -628,11 +689,12 @@ export class Task extends EventEmitter<TaskEvents> {
 				if (pathMatch && pathMatch[1] && searchMatch && searchMatch[1] && replaceMatch && replaceMatch[1]) {
 					try {
 						const filePath = pathMatch[1].trim()
+						const resolvedPath = this.resolvePath(filePath)
 						const searchText = searchMatch[1].trim()
 						const replaceText = replaceMatch[1].trim()
 						
 						// Read the file
-						const content = await this.fileSystem.readFile(filePath)
+						const content = await this.fileSystem.readFile(resolvedPath)
 						
 						// Perform the replacement
 						const updatedContent = content.replace(new RegExp(searchText, 'g'), replaceText)
@@ -643,7 +705,7 @@ export class Task extends EventEmitter<TaskEvents> {
 						}
 						
 						// Write the updated content back
-						await this.fileSystem.writeFile(filePath, updatedContent)
+						await this.fileSystem.writeFile(resolvedPath, updatedContent)
 						
 						const matchCount = (content.match(new RegExp(searchText, 'g')) || []).length
 						return `[search_and_replace Result]\n\nSuccessfully replaced ${matchCount} occurrence(s) of "${searchText}" with "${replaceText}" in file: ${filePath}`
@@ -653,11 +715,36 @@ export class Task extends EventEmitter<TaskEvents> {
 				}
 			}
 
+			if (message.includes('<change_working_directory>')) {
+				// Extract directory path from XML tags
+				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
+				if (pathMatch && pathMatch[1]) {
+					try {
+						const newDirectory = pathMatch[1].trim()
+						const resolvedPath = await this.changeWorkingDirectory(newDirectory)
+						return `[change_working_directory Result]\n\nChanged working directory to: ${resolvedPath}\n\nAll subsequent file operations and commands will be relative to this directory.`
+					} catch (error) {
+						return `[change_working_directory Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+					}
+				}
+			}
+
 			// Add more tool implementations as needed
 			return null
 		} catch (error) {
 			console.error("[Task] Error executing tools:", error)
 			return `[Tool Execution Error]\n\n${error instanceof Error ? error.message : String(error)}`
+		}
+	}
+
+	// Helper method to resolve relative paths based on current working directory
+	private resolvePath(filePath: string): string {
+		if (path.isAbsolute(filePath)) {
+			// Absolute path - use as is
+			return filePath
+		} else {
+			// Relative path - resolve relative to current working directory using proper path utilities
+			return path.resolve(this.currentWorkingDirectory, filePath)
 		}
 	}
 }

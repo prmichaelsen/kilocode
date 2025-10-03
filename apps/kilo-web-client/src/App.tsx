@@ -75,6 +75,7 @@ export default function App() {
 	const [historyLoading, setHistoryLoading] = useState(false)
 
 	const wsRef = useRef<WebSocket | null>(null)
+	const inputRef = useRef<HTMLInputElement | null>(null)
 	const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 	const reconnectAttempts = useRef(0)
 	const maxReconnectAttempts = 5
@@ -337,6 +338,11 @@ export default function App() {
 		wsRef.current.send(JSON.stringify(message))
 		setInput("")
 		setTaskState((prev) => ({ ...prev, status: "running", isStreaming: true }))
+		
+		// Keep input focused after sending message
+		setTimeout(() => {
+			inputRef.current?.focus()
+		}, 100)
 	}
 
 	const handleApproval = (approved: boolean) => {
@@ -627,6 +633,7 @@ export default function App() {
 			<div className="border-t border-gray-700 bg-gray-800 p-3 md:p-4">
 				<div className="flex gap-2">
 					<input
+						ref={inputRef}
 						type="text"
 						value={input}
 						onChange={(e) => setInput(e.target.value)}
