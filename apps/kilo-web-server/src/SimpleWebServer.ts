@@ -11,6 +11,11 @@ import type { ApiHandler, ProviderSettings, VSCodeAPI, TaskOptions, TaskDependen
 // Import Firebase service
 import { FirebaseService, TaskHistory } from "./services/FirebaseService"
 
+// Import web adapters
+import { NodeTerminalAdapter } from "./adapters/TerminalAdapter"
+import { NodeFileSystemAdapter } from "./adapters/FileSystemAdapter"
+import { WebToolExecutor } from "./adapters/ToolExecutor"
+
 export interface ChatMessage {
 	id: string
 	content: string
@@ -29,6 +34,7 @@ interface ClientSession {
 	kilocodeToken?: string
 	currentTask?: any // Store the current Task instance
 	messageCounter: number // Track message sequence
+	toolExecutor?: WebToolExecutor // Tool executor for handling XML commands
 }
 
 export class SimpleWebServer {
@@ -293,11 +299,20 @@ export class SimpleWebServer {
 				kilocodeModel: "anthropic/claude-3.5-sonnet:beta",
 			}
 
-			// Create task dependencies for web environment
+			// Create task dependencies for web environment with real adapters
+			const workspacePath = process.env.HOME || "/home/user"
+			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
+			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
+			
 			const dependencies: TaskDependencies = {
-				workspacePath: "/project",
-				globalStoragePath: "/storage",
+				workspacePath,
+				globalStoragePath: "/tmp/kilo-web-storage", // Use temp directory for storage
+				fileSystem: fileSystemAdapter,
+				terminalAdapter,
 			}
+
+			// Create tool executor for handling XML tool commands
+			const toolExecutor = new WebToolExecutor(fileSystemAdapter, terminalAdapter)
 
 			// Create Task with orchestration
 			const task = new Task({
@@ -307,8 +322,9 @@ export class SimpleWebServer {
 				task: userText,
 			})
 
-			// Store task in session for continuous interaction
+			// Store task and tool executor in session for continuous interaction
 			session.currentTask = task
+			session.toolExecutor = toolExecutor
 
 			// Create Firebase task history entry (if Firebase is available)
 			if (this.firebaseService) {
@@ -337,11 +353,28 @@ export class SimpleWebServer {
 			// Listen to task events and stream to client
 			task.on("message", async (message) => {
 				if (message.type === "say" && message.say === "text") {
+					let messageContent = message.text || ""
+					
+					// Check for tool commands in complete messages and execute them
+					if (!message.partial && toolExecutor && messageContent.includes('<')) {
+						try {
+							const toolResults = await toolExecutor.executeTools(messageContent)
+							if (toolResults) {
+								// Append tool results to the message content
+								messageContent += `\n\n${toolResults}`
+								console.log(`[SimpleWebServer] Executed tools for task ${taskId}`)
+							}
+						} catch (toolError) {
+							console.error(`[SimpleWebServer] Tool execution error:`, toolError)
+							messageContent += `\n\nTool execution error: ${toolError instanceof Error ? toolError.message : String(toolError)}`
+						}
+					}
+
 					// Send streaming chunk with consistent message ID
 					this.sendToClient(session, {
 						type: "stream_chunk",
 						payload: {
-							content: message.text || "",
+							content: messageContent,
 							partial: message.partial || false,
 							messageType: "say",
 							say: "text",
@@ -355,7 +388,7 @@ export class SimpleWebServer {
 					if (!message.partial) {
 						const assistantMessage: ChatMessage = {
 							id: messageId,
-							content: message.text || "",
+							content: messageContent,
 							type: "assistant",
 							timestamp: message.ts || Date.now(),
 							messageIndex: session.messageCounter,
@@ -364,10 +397,12 @@ export class SimpleWebServer {
 						session.messages.push(assistantMessage)
 
 						// Update Firebase with new message
-						try {
-							await this.firebaseService.addMessageToTask(taskId, assistantMessage)
-						} catch (firebaseError) {
-							console.error(`[SimpleWebServer] Failed to add message to Firebase:`, firebaseError)
+						if (this.firebaseService) {
+							try {
+								await this.firebaseService.addMessageToTask(taskId, assistantMessage)
+							} catch (firebaseError) {
+								console.error(`[SimpleWebServer] Failed to add message to Firebase:`, firebaseError)
+							}
 						}
 					}
 				}
