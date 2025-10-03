@@ -15,6 +15,7 @@ import { FirebaseService, TaskHistory } from "./services/FirebaseService"
 import { NodeTerminalAdapter } from "./adapters/TerminalAdapter"
 import { NodeFileSystemAdapter } from "./adapters/FileSystemAdapter"
 import { WebToolExecutor } from "./adapters/ToolExecutor"
+import { FirebaseTaskStorageAdapter } from "./adapters/TaskStorageAdapter"
 
 export interface ChatMessage {
 	id: string
@@ -35,6 +36,7 @@ interface ClientSession {
 	currentTask?: any // Store the current Task instance
 	messageCounter: number // Track message sequence
 	toolExecutor?: WebToolExecutor // Tool executor for handling XML commands
+	storageAdapter?: FirebaseTaskStorageAdapter // Storage adapter for conversation persistence
 }
 
 export class SimpleWebServer {
@@ -261,9 +263,23 @@ export class SimpleWebServer {
 				// Continue existing task by sending user message to it
 				await this.continueExistingTask(session, text)
 			} else {
-				// Task doesn't exist, create a new one
-				console.log(`[SimpleWebServer] Task ${taskId} not found, creating new task`)
-				await this.createTaskForSession(session, text, taskId)
+				// Task doesn't exist, try to load from Firebase and resume
+				console.log(`[SimpleWebServer] Task ${taskId} not found in session, attempting to load from Firebase`)
+				try {
+					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
+					if (taskHistory) {
+						// Load the task and continue conversation
+						await this.resumeTaskFromFirebase(session, taskHistory, text)
+					} else {
+						// Task doesn't exist anywhere, create a new one
+						console.log(`[SimpleWebServer] Task ${taskId} not found in Firebase, creating new task`)
+						await this.createTaskForSession(session, text, taskId)
+					}
+				} catch (error) {
+					console.error(`[SimpleWebServer] Error loading task from Firebase:`, error)
+					// Fallback to creating new task
+					await this.createTaskForSession(session, text, taskId)
+				}
 			}
 		} catch (error) {
 			console.error("[SimpleWebServer] Error handling continue task:", error)
@@ -303,16 +319,21 @@ export class SimpleWebServer {
 			const workspacePath = process.env.HOME || "/home/user"
 			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
 			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
+			const storageAdapter = new FirebaseTaskStorageAdapter()
 			
 			const dependencies: TaskDependencies = {
 				workspacePath,
 				globalStoragePath: "/tmp/kilo-web-storage", // Use temp directory for storage
 				fileSystem: fileSystemAdapter,
 				terminalAdapter,
+				storage: storageAdapter,
 			}
 
 			// Create tool executor for handling XML tool commands
 			const toolExecutor = new WebToolExecutor(fileSystemAdapter, terminalAdapter)
+
+			// Store storage adapter in session for reuse
+			session.storageAdapter = storageAdapter
 
 			// Create Task with orchestration
 			const task = new Task({
@@ -346,115 +367,8 @@ export class SimpleWebServer {
 				}
 			}
 
-			// Generate unique message ID for this response stream
-			const messageId = `msg_${taskId}_${session.messageCounter++}_${Date.now()}`
-			const streamId = `stream_${taskId}_${session.messageCounter}`
-
-			// Listen to task events and stream to client
-			task.on("message", async (message) => {
-				if (message.type === "say" && message.say === "text") {
-					let messageContent = message.text || ""
-					
-					// Check for tool commands in complete messages and execute them
-					if (!message.partial && toolExecutor && messageContent.includes('<')) {
-						try {
-							const toolResults = await toolExecutor.executeTools(messageContent)
-							if (toolResults) {
-								// Append tool results to the message content
-								messageContent += `\n\n${toolResults}`
-								console.log(`[SimpleWebServer] Executed tools for task ${taskId}`)
-							}
-						} catch (toolError) {
-							console.error(`[SimpleWebServer] Tool execution error:`, toolError)
-							messageContent += `\n\nTool execution error: ${toolError instanceof Error ? toolError.message : String(toolError)}`
-						}
-					}
-
-					// Send streaming chunk with consistent message ID
-					this.sendToClient(session, {
-						type: "stream_chunk",
-						payload: {
-							content: messageContent,
-							partial: message.partial || false,
-							messageType: "say",
-							say: "text",
-							ts: message.ts || Date.now(),
-							messageId,
-							streamId,
-						},
-					})
-
-					// Only add to session messages when complete
-					if (!message.partial) {
-						const assistantMessage: ChatMessage = {
-							id: messageId,
-							content: messageContent,
-							type: "assistant",
-							timestamp: message.ts || Date.now(),
-							messageIndex: session.messageCounter,
-							streamId,
-						}
-						session.messages.push(assistantMessage)
-
-						// Update Firebase with new message
-						if (this.firebaseService) {
-							try {
-								await this.firebaseService.addMessageToTask(taskId, assistantMessage)
-							} catch (firebaseError) {
-								console.error(`[SimpleWebServer] Failed to add message to Firebase:`, firebaseError)
-							}
-						}
-					}
-				}
-			})
-
-			task.on("completed", async (result) => {
-				console.log(`[SimpleWebServer] Task completed: ${result}`)
-				
-				// Update Firebase task status
-				try {
-					await this.firebaseService.updateTaskStatus(taskId, 'completed')
-				} catch (firebaseError) {
-					console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
-				}
-
-				// Send task state update to indicate completion
-				this.sendToClient(session, {
-					type: "task_state",
-					payload: {
-						taskId,
-						status: "completed",
-						isStreaming: false,
-						enableButtons: false,
-					},
-				})
-			})
-
-			task.on("error", async (error) => {
-				console.error(`[SimpleWebServer] Task error: ${error}`)
-				
-				// Update Firebase task status
-				try {
-					await this.firebaseService.updateTaskStatus(taskId, 'error')
-				} catch (firebaseError) {
-					console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
-				}
-
-				this.sendToClient(session, {
-					type: "error",
-					payload: { message: error },
-				})
-				// Reset task state on error
-				this.sendToClient(session, {
-					type: "task_state",
-					payload: {
-						taskId,
-						status: "error",
-						isStreaming: false,
-						enableButtons: false,
-					},
-				})
-			})
+			// Set up task event listeners for streaming
+			this.setupTaskEventListeners(session, task, taskId)
 
 			console.log(`[SimpleWebServer] Created Task ${taskId} for session ${session.id}`)
 		} catch (error) {
@@ -464,19 +378,240 @@ export class SimpleWebServer {
 		}
 	}
 
+	private setupTaskEventListeners(session: ClientSession, task: any, taskId: string) {
+		// Track if we've already added a message for this timestamp to prevent duplicates
+		const processedTimestamps = new Set<number>()
+
+		// Listen to task events and stream to client
+		task.on("message", async (message: any) => {
+			if (message.type === "say" && message.say === "text") {
+				const messageTimestamp = message.ts || Date.now()
+				
+				// Skip if we've already processed this timestamp (prevents duplicates)
+				if (processedTimestamps.has(messageTimestamp) && !message.partial) {
+					return
+				}
+
+				let messageContent = message.text || ""
+				
+				// Check for tool commands in complete messages and execute them for display
+				// This shows tool output to the user while the main task loop handles context
+				if (!message.partial && session.toolExecutor && messageContent.includes('<')) {
+					try {
+						const toolResults = await session.toolExecutor.executeTools(messageContent)
+						if (toolResults) {
+							// Show tool results to user by appending to message content
+							messageContent += `\n\n${toolResults}`
+							console.log(`[SimpleWebServer] Executed tools for display in task ${taskId}`)
+						}
+					} catch (toolError) {
+						console.error(`[SimpleWebServer] Tool execution error:`, toolError)
+						messageContent += `\n\nTool execution error: ${toolError instanceof Error ? toolError.message : String(toolError)}`
+					}
+				}
+
+				// Generate unique message ID for streaming
+				const messageId = `msg_${taskId}_${messageTimestamp}`
+				const streamId = `stream_${taskId}_${session.messageCounter}`
+
+				// Send streaming chunk with consistent message ID
+				this.sendToClient(session, {
+					type: "stream_chunk",
+					payload: {
+						content: messageContent,
+						partial: message.partial || false,
+						messageType: "say",
+						say: "text",
+						ts: messageTimestamp,
+						messageId,
+						streamId,
+					},
+				})
+
+				// Only add to session messages when complete and not already processed
+				if (!message.partial && !processedTimestamps.has(messageTimestamp)) {
+					processedTimestamps.add(messageTimestamp)
+					
+					const assistantMessage: ChatMessage = {
+						id: messageId,
+						content: messageContent,
+						type: "assistant",
+						timestamp: messageTimestamp,
+						messageIndex: session.messageCounter++,
+						streamId,
+					}
+					session.messages.push(assistantMessage)
+
+					// Update Firebase with new message (with error handling)
+					if (this.firebaseService) {
+						try {
+							await this.firebaseService.addMessageToTask(taskId, assistantMessage)
+						} catch (firebaseError) {
+							console.error(`[SimpleWebServer] Failed to add message to Firebase:`, firebaseError)
+							// Don't fail the task if Firebase fails
+						}
+					}
+
+					// Keep task in running state after messages (unless explicit completion)
+					const hasAttemptCompletion = messageContent.includes('<attempt_completion>')
+					if (!hasAttemptCompletion) {
+						this.sendToClient(session, {
+							type: "task_state",
+							payload: {
+								taskId,
+								status: "idle", // Set to idle to allow further input
+								isStreaming: false,
+								enableButtons: false,
+							},
+						})
+					}
+				}
+			}
+		})
+
+		task.on("completed", async (result: string) => {
+			console.log(`[SimpleWebServer] Task completed: ${result}`)
+			
+			// Update Firebase task status
+			try {
+				await this.firebaseService.updateTaskStatus(taskId, 'completed')
+			} catch (firebaseError) {
+				console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
+			}
+
+			// Send task state update to indicate completion but keep task available for continuation
+			this.sendToClient(session, {
+				type: "task_state",
+				payload: {
+					taskId,
+					status: "idle", // Change to idle instead of completed to allow continuation
+					isStreaming: false,
+					enableButtons: false,
+				},
+			})
+		})
+
+		task.on("error", async (error: string) => {
+			console.error(`[SimpleWebServer] Task error: ${error}`)
+			
+			// Update Firebase task status
+			try {
+				await this.firebaseService.updateTaskStatus(taskId, 'error')
+			} catch (firebaseError) {
+				console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
+			}
+
+			this.sendToClient(session, {
+				type: "error",
+				payload: { message: error },
+			})
+			// Reset task state on error
+			this.sendToClient(session, {
+				type: "task_state",
+				payload: {
+					taskId,
+					status: "error",
+					isStreaming: false,
+					enableButtons: false,
+				},
+			})
+		})
+	}
+
 	private async continueExistingTask(session: ClientSession, userText: string) {
 		try {
 			if (!session.currentTask) {
 				throw new Error("No current task to continue")
 			}
 
-			// For resumed tasks, we need to create a new Task instance or handle differently
-			// Since we're using the shared Task class, we need to create a proper task
-			// For now, let's create a new task with the user's message
-			const taskId = session.currentTask.taskId || `task_${Date.now()}_${session.id}`
-			await this.createTaskForSession(session, userText, taskId)
+			const task = session.currentTask
+			const taskId = task.taskId
+
+			console.log(`[SimpleWebServer] Continuing existing task ${taskId} with conversation context`)
+
+			// Use the new continueConversation method to maintain context
+			if (task.continueConversation) {
+				await task.continueConversation(userText)
+				console.log(`[SimpleWebServer] Continued conversation for task ${taskId}`)
+			} else if (task.setMessageResponse) {
+				// Fallback to setMessageResponse for compatibility
+				task.setMessageResponse(userText)
+				console.log(`[SimpleWebServer] Sent user message to existing task ${taskId}`)
+			} else {
+				console.warn(`[SimpleWebServer] Task ${taskId} doesn't support conversation continuation, creating new task`)
+				await this.createTaskForSession(session, userText, taskId)
+			}
+		} catch (error) {
+			console.error("[SimpleWebServer] Error continuing task:", error)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			await this.streamResponse(session, `Task continuation error: ${errorMessage}`)
+		}
+	}
+
+	private async resumeTaskFromFirebase(session: ClientSession, taskHistory: any, newUserText: string) {
+		try {
+			console.log(`[SimpleWebServer] Resuming task ${taskHistory.taskId} from Firebase with ${taskHistory.messages?.length || 0} messages`)
+
+			// Create provider configuration
+			if (!session.kilocodeToken) {
+				const token = process.env.KILOCODE_TOKEN
+				if (!token) {
+					throw new Error("KILOCODE_TOKEN environment variable not set")
+				}
+				session.kilocodeToken = token
+			}
+
+			const providerConfig: ProviderSettings = {
+				apiProvider: "kilocode",
+				kilocodeToken: session.kilocodeToken!,
+				kilocodeModel: "anthropic/claude-3.5-sonnet:beta",
+			}
+
+			// Create task dependencies with storage adapter
+			const workspacePath = process.env.HOME || "/home/user"
+			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
+			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
+			const storageAdapter = new FirebaseTaskStorageAdapter()
 			
-			console.log(`[SimpleWebServer] Continued task ${taskId} for session ${session.id}`)
+			const dependencies: TaskDependencies = {
+				workspacePath,
+				globalStoragePath: "/tmp/kilo-web-storage",
+				fileSystem: fileSystemAdapter,
+				terminalAdapter,
+				storage: storageAdapter,
+			}
+
+			// Create tool executor
+			const toolExecutor = new WebToolExecutor(fileSystemAdapter, terminalAdapter)
+
+			// Create Task instance with existing taskId to load conversation history
+			const task = new Task({
+				taskId: taskHistory.taskId,
+				apiConfiguration: providerConfig,
+				dependencies,
+				// Don't provide task text - we're resuming, not starting fresh
+			})
+
+			// Store task and tool executor in session
+			session.currentTask = task
+			session.toolExecutor = toolExecutor
+			session.storageAdapter = storageAdapter
+
+			// Load existing messages into session
+			session.messages = [...taskHistory.messages]
+
+			// Set up task event listeners for streaming
+			this.setupTaskEventListeners(session, task, taskHistory.taskId)
+
+			// Continue the conversation with the new user message
+			if (task.continueConversation) {
+				await task.continueConversation(newUserText)
+			} else {
+				console.warn(`[SimpleWebServer] Task doesn't support continueConversation, using setMessageResponse`)
+				task.setMessageResponse(newUserText)
+			}
+
+			console.log(`[SimpleWebServer] Successfully resumed task ${taskHistory.taskId} and continued conversation`)
 		} catch (error) {
 			console.error("[SimpleWebServer] Error continuing task:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)

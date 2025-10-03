@@ -158,6 +158,7 @@ export default function App() {
 
 		if (isTaskCreatedMessage(message)) {
 			// Handle task creation - update task state with new task info
+			setCurrentTaskId(message.payload.taskId)
 			setTaskState((prev) => ({
 				...prev,
 				taskId: message.payload.taskId,
@@ -520,10 +521,11 @@ export default function App() {
 						</div>
 					</div>
 
-					{taskState.taskId && (
+					{(taskState.taskId || currentTaskId) && (
 						<div className="mt-2 text-sm text-gray-300">
-							Task: {taskState.taskId} | Status: {taskState.status}
+							Task: {taskState.taskId || currentTaskId} | Status: {taskState.status}
 							{taskState.isStreaming && <span className="text-blue-400"> • Streaming...</span>}
+							{currentTaskId && <span className="text-green-400"> • Context Maintained</span>}
 						</div>
 					)}
 				</div>

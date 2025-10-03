@@ -8,6 +8,14 @@ export interface TaskDependencies {
 	terminalAdapter?: TerminalAdapter
 	workspacePath: string
 	globalStoragePath: string
+	storage?: TaskStorageAdapter
+}
+
+export interface TaskStorageAdapter {
+	saveApiMessages(taskId: string, messages: any[]): Promise<void>
+	loadApiMessages(taskId: string): Promise<any[]>
+	saveClineMessages(taskId: string, messages: ClineMessage[]): Promise<void>
+	loadClineMessages(taskId: string): Promise<ClineMessage[]>
 }
 
 export interface FileSystemAdapter {

@@ -38,9 +38,10 @@ export class Task extends EventEmitter<TaskEvents> {
 	abort: boolean = false
 	isInitialized = false
 
-	// Messages
+	// Messages - persistent conversation history
 	clineMessages: ClineMessage[] = []
 	apiConversationHistory: any[] = []
+	private conversationInitialized = false
 
 	// Ask/Response handling
 	private askResponse?: ClineAskResponse
@@ -71,9 +72,25 @@ export class Task extends EventEmitter<TaskEvents> {
 		this.apiConfiguration = options.apiConfiguration
 		this.api = buildApiHandler(options.apiConfiguration)
 
-		if (options.task || options.images) {
-			this.startTask(options.task, options.images)
-		}
+		// Load existing conversation history if available
+		this.initializeConversationHistory().then(() => {
+			if (options.task || options.images) {
+				this.startTask(options.task, options.images)
+			}
+		}).catch(error => {
+			console.error("Failed to initialize conversation history:", error)
+			if (options.task || options.images) {
+				this.startTask(options.task, options.images)
+			}
+		})
+	}
+
+	private async initializeConversationHistory(): Promise<void> {
+		await Promise.all([
+			this.loadApiConversationHistory(),
+			this.loadClineMessages()
+		])
+		this.conversationInitialized = true
 	}
 
 	private createDefaultFileSystem(): FileSystemAdapter {
@@ -180,6 +197,7 @@ export class Task extends EventEmitter<TaskEvents> {
 
 	private async addToClineMessages(message: ClineMessage) {
 		this.clineMessages.push(message)
+		await this.saveClineMessages()
 		this.emit("message", message)
 	}
 
@@ -187,6 +205,38 @@ export class Task extends EventEmitter<TaskEvents> {
 		this.askResponseText = text
 		this.askResponseImages = images
 		this.askResponse = "messageResponse"
+	}
+
+	// Method to continue an existing conversation with a new user message
+	public async continueConversation(text: string, images?: string[]): Promise<void> {
+		if (this.abort) {
+			throw new Error(`Task ${this.taskId} aborted`)
+		}
+
+		console.log(`[Task] Continuing conversation for task ${this.taskId}`)
+
+		// Add user message to conversation
+		await this.say("user_feedback", text, images)
+
+		// Create user content for API
+		let userContent: Anthropic.Messages.ContentBlockParam[] = [
+			{ type: "text", text }
+		]
+
+		if (images && images.length > 0) {
+			const imageBlocks: Anthropic.ImageBlockParam[] = images.map((image) => ({
+				type: "image" as const,
+				source: {
+					type: "base64" as const,
+					media_type: "image/jpeg" as const,
+					data: image.split(",")[1] || image,
+				},
+			}))
+			userContent.push(...imageBlocks)
+		}
+
+		// Continue the task loop with the new user content
+		await this.initiateTaskLoop(userContent)
 	}
 
 	public approveAsk({ text, images }: { text?: string; images?: string[] } = {}) {
@@ -202,8 +252,12 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	private async startTask(task?: string, images?: string[]): Promise<void> {
-		this.clineMessages = []
-		this.apiConversationHistory = []
+		// Only reset conversation history if this is truly a new conversation
+		if (!this.conversationInitialized) {
+			this.clineMessages = []
+			this.apiConversationHistory = []
+			this.conversationInitialized = true
+		}
 
 		await this.say("text", task, images)
 		this.isInitialized = true
@@ -305,14 +359,33 @@ export class Task extends EventEmitter<TaskEvents> {
 					content: [{ type: "text", text: assistantMessage }],
 				})
 
-				// Check for completion or tool use
+				// Check for tool use and completion
 				const hasToolUse = this.checkForToolUse(assistantMessage)
-				const hasCompletion = this.checkForCompletion(assistantMessage)
+				const hasAttemptCompletion = assistantMessage.includes('<attempt_completion>')
 
-				if (hasCompletion) {
-					console.log(`[Task] Task completed successfully`)
+				// Only complete if there's an explicit attempt_completion tag
+				if (hasAttemptCompletion) {
+					console.log(`[Task] Task completed with attempt_completion`)
 					this.emit("completed", "Task completed")
 					return { didEndLoop: true }
+				}
+
+				if (hasToolUse) {
+					// Execute tools and add results to conversation context
+					const toolResults = await this.executeToolsInMessage(assistantMessage)
+					if (toolResults) {
+						// Add tool results as user message to maintain conversation context
+						await this.addToApiConversationHistory({
+							role: "user",
+							content: [{ type: "text", text: toolResults }],
+						})
+						
+						// Continue the conversation with tool results
+						return {
+							didEndLoop: false,
+							nextUserContent: [{ type: "text", text: toolResults }],
+						}
+					}
 				}
 
 				if (!hasToolUse) {
@@ -338,17 +411,68 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	private async addToApiConversationHistory(message: any) {
-		this.apiConversationHistory.push({ ...message, ts: Date.now() })
+		const messageWithTs = { ...message, ts: Date.now() }
+		this.apiConversationHistory.push(messageWithTs)
+		await this.saveApiConversationHistory()
+	}
+
+	private async saveApiConversationHistory() {
+		try {
+			// Save to dependencies storage if available
+			if (this.dependencies.storage) {
+				await this.dependencies.storage.saveApiMessages(this.taskId, this.apiConversationHistory)
+			}
+		} catch (error) {
+			console.error("Failed to save API conversation history:", error)
+		}
+	}
+
+	private async loadApiConversationHistory(): Promise<void> {
+		try {
+			if (this.dependencies.storage) {
+				const savedHistory = await this.dependencies.storage.loadApiMessages(this.taskId)
+				if (savedHistory && savedHistory.length > 0) {
+					this.apiConversationHistory = savedHistory
+					console.log(`[Task] Loaded ${savedHistory.length} API messages from storage`)
+				}
+			}
+		} catch (error) {
+			console.error("Failed to load API conversation history:", error)
+		}
+	}
+
+	private async saveClineMessages() {
+		try {
+			if (this.dependencies.storage) {
+				await this.dependencies.storage.saveClineMessages(this.taskId, this.clineMessages)
+			}
+		} catch (error) {
+			console.error("Failed to save Cline messages:", error)
+		}
+	}
+
+	private async loadClineMessages(): Promise<void> {
+		try {
+			if (this.dependencies.storage) {
+				const savedMessages = await this.dependencies.storage.loadClineMessages(this.taskId)
+				if (savedMessages && savedMessages.length > 0) {
+					this.clineMessages = savedMessages
+					console.log(`[Task] Loaded ${savedMessages.length} Cline messages from storage`)
+				}
+			}
+		} catch (error) {
+			console.error("Failed to load Cline messages:", error)
+		}
 	}
 
 	private getSystemPrompt(): string {
 		const systemPrompt = generateWebSystemPrompt(this.workspacePath)
 		
 		// Debug: Log the entire system prompt for inspection
-		console.log('[Task] System Prompt:')
-		console.log('='.repeat(80))
-		console.log(systemPrompt)
-		console.log('='.repeat(80))
+		// console.log('[Task] System Prompt:')
+		// console.log('='.repeat(80))
+		// console.log(systemPrompt)
+		// console.log('='.repeat(80))
 		
 		return systemPrompt
 	}
@@ -399,18 +523,52 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	private checkForCompletion(message: string): boolean {
-		// Check for completion patterns
-		const completionPatterns = [
-			/<attempt_completion>/,
-			/task.*complete/i,
-			/finished.*task/i,
-			/I have completed/i,
-			/The task is complete/i,
-		]
-		return completionPatterns.some((pattern) => pattern.test(message))
+		// Only check for explicit attempt_completion tag, not general completion language
+		return /<attempt_completion>/.test(message)
 	}
 
 	public get cwd() {
 		return this.workspacePath
+	}
+
+	// Execute tools found in assistant message and return results
+	private async executeToolsInMessage(message: string): Promise<string | null> {
+		try {
+			// Check if we have a file system adapter for tool execution
+			if (!this.fileSystem) {
+				console.warn("[Task] No file system adapter available for tool execution")
+				return null
+			}
+
+			// Simple tool execution - this should be replaced with proper tool executor
+			if (message.includes('<list_files>')) {
+				try {
+					const files = await this.fileSystem.readDirectory(this.workspacePath)
+					return `[list_files Result]\n\nFiles in ${this.workspacePath}:\n${files.join('\n')}`
+				} catch (error) {
+					return `[list_files Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+				}
+			}
+
+			if (message.includes('<execute_command>')) {
+				// Extract command from XML tags
+				const commandMatch = message.match(/<command>(.*?)<\/command>/s)
+				if (commandMatch && commandMatch[1] && this.dependencies.terminalAdapter) {
+					try {
+						const command = commandMatch[1].trim()
+						const result = await this.dependencies.terminalAdapter.executeCommand(command, this.workspacePath)
+						return `[execute_command Result]\n\nCommand: ${command}\nExit Code: ${result.exitCode}\n\nOutput:\n${result.stdout}\n\nError:\n${result.stderr}`
+					} catch (error) {
+						return `[execute_command Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`
+					}
+				}
+			}
+
+			// Add more tool implementations as needed
+			return null
+		} catch (error) {
+			console.error("[Task] Error executing tools:", error)
+			return `[Tool Execution Error]\n\n${error instanceof Error ? error.message : String(error)}`
+		}
 	}
 }

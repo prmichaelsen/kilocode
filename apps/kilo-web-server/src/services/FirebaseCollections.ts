@@ -8,6 +8,7 @@ export const FirebaseCollections = {
 	TASK_HISTORY: 'kilo.taskHistory',
 	TASK_MESSAGES: 'kilo.taskMessages',
 	TASK_METADATA: 'kilo.taskMetadata',
+	API_MESSAGES: 'kilo.apiMessages',
 	
 	// User and session collections
 	USER_SESSIONS: 'kilo.userSessions',

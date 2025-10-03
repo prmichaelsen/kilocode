@@ -1,6 +1,7 @@
 import admin from 'firebase-admin'
 import { ChatMessage } from '../SimpleWebServer'
 import { FirebaseCollections } from './FirebaseCollections'
+import { prepareForFirestore, sanitizeFirestoreData } from '../utils/firestore-utils'
 
 interface TaskHistory {
 	taskId: string
@@ -81,11 +82,13 @@ export class FirebaseService {
 
 	async saveTaskHistory(taskHistory: TaskHistory): Promise<void> {
 		try {
-			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskHistory.taskId).set({
+			const sanitizedData = prepareForFirestore({
 				...taskHistory,
 				createdAt: admin.firestore.Timestamp.fromDate(taskHistory.createdAt),
 				updatedAt: admin.firestore.Timestamp.fromDate(taskHistory.updatedAt),
-			})
+			}, 'task history save')
+
+			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskHistory.taskId).set(sanitizedData)
 		} catch (error) {
 			console.error('[FirebaseService] Error saving task history:', error)
 			throw error
@@ -100,14 +103,38 @@ export class FirebaseService {
 			}
 
 			const data = doc.data()!
+			
+			// Safe date parsing with fallbacks
+			const parseDate = (dateField: any): Date => {
+				try {
+					if (!dateField) {
+						return new Date()
+					}
+					if (typeof dateField.toDate === 'function') {
+						return dateField.toDate()
+					}
+					if (dateField instanceof Date) {
+						return dateField
+					}
+					if (typeof dateField === 'string' || typeof dateField === 'number') {
+						return new Date(dateField)
+					}
+					return new Date()
+				} catch (error) {
+					console.warn(`[FirebaseService] Error parsing date field:`, error)
+					return new Date()
+				}
+			}
+
 			return {
 				...data,
-				createdAt: data.createdAt.toDate(),
-				updatedAt: data.updatedAt.toDate(),
+				createdAt: parseDate(data.createdAt),
+				updatedAt: parseDate(data.updatedAt),
 			} as TaskHistory
 		} catch (error) {
 			console.error('[FirebaseService] Error getting task history:', error)
-			throw error
+			// Return null instead of throwing to prevent crashes
+			return null
 		}
 	}
 
@@ -119,17 +146,40 @@ export class FirebaseService {
 				.limit(limit)
 				.get()
 
+			// Safe date parsing helper
+			const parseDate = (dateField: any): Date => {
+				try {
+					if (!dateField) {
+						return new Date()
+					}
+					if (typeof dateField.toDate === 'function') {
+						return dateField.toDate()
+					}
+					if (dateField instanceof Date) {
+						return dateField
+					}
+					if (typeof dateField === 'string' || typeof dateField === 'number') {
+						return new Date(dateField)
+					}
+					return new Date()
+				} catch (error) {
+					console.warn(`[FirebaseService] Error parsing date field:`, error)
+					return new Date()
+				}
+			}
+
 			return snapshot.docs.map(doc => {
 				const data = doc.data()
 				return {
 					...data,
-					createdAt: data.createdAt.toDate(),
-					updatedAt: data.updatedAt.toDate(),
+					createdAt: parseDate(data.createdAt),
+					updatedAt: parseDate(data.updatedAt),
 				} as TaskHistory
-			})
+			}).filter(task => task.taskId) // Filter out any malformed tasks
 		} catch (error) {
 			console.error('[FirebaseService] Error getting global task history:', error)
-			throw error
+			// Return empty array instead of throwing to prevent crashes
+			return []
 		}
 	}
 
@@ -141,10 +191,12 @@ export class FirebaseService {
 
 	async updateTaskStatus(taskId: string, status: TaskHistory['status']): Promise<void> {
 		try {
-			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId).update({
+			const sanitizedData = prepareForFirestore({
 				status,
 				updatedAt: admin.firestore.Timestamp.now(),
-			})
+			}, 'task status update')
+
+			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId).update(sanitizedData)
 		} catch (error) {
 			console.error('[FirebaseService] Error updating task status:', error)
 			throw error
@@ -153,13 +205,47 @@ export class FirebaseService {
 
 	async addMessageToTask(taskId: string, message: ChatMessage): Promise<void> {
 		try {
-			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId).update({
-				messages: admin.firestore.FieldValue.arrayUnion(message),
+			const sanitizedMessage = prepareForFirestore(message, 'message add')
+			const updateData = prepareForFirestore({
+				messages: admin.firestore.FieldValue.arrayUnion(sanitizedMessage),
 				updatedAt: admin.firestore.Timestamp.now(),
-			})
+			}, 'message add update')
+
+			await this.db.collection(FirebaseCollections.TASK_HISTORY).doc(taskId).update(updateData)
 		} catch (error) {
 			console.error('[FirebaseService] Error adding message to task:', error)
 			throw error
+		}
+	}
+
+	// API Messages storage for conversation context
+	async saveApiMessages(taskId: string, messages: any[]): Promise<void> {
+		try {
+			const sanitizedData = prepareForFirestore({
+				taskId,
+				messages: messages.map(msg => prepareForFirestore(msg, 'API message')),
+				updatedAt: admin.firestore.Timestamp.now(),
+			}, 'API messages save')
+
+			await this.db.collection(FirebaseCollections.API_MESSAGES).doc(taskId).set(sanitizedData)
+			console.log(`[FirebaseService] Saved ${messages.length} API messages for task ${taskId}`)
+		} catch (error) {
+			console.error(`[FirebaseService] Error saving API messages:`, error)
+			throw error
+		}
+	}
+
+	async loadApiMessages(taskId: string): Promise<any[]> {
+		try {
+			const doc = await this.db.collection(FirebaseCollections.API_MESSAGES).doc(taskId).get()
+			if (doc.exists) {
+				const data = doc.data()
+				return data?.messages || []
+			}
+			return []
+		} catch (error) {
+			console.error(`[FirebaseService] Error loading API messages:`, error)
+			return []
 		}
 	}
 }
