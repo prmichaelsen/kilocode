@@ -8,12 +8,17 @@ import cors from "cors"
 import { buildApiHandler, Task } from "@roo-code/shared"
 import type { ApiHandler, ProviderSettings, VSCodeAPI, TaskOptions, TaskDependencies } from "@roo-code/shared"
 
-interface ChatMessage {
+// Import Firebase service
+import { FirebaseService, TaskHistory } from "./services/FirebaseService"
+
+export interface ChatMessage {
 	id: string
 	content: string
 	type: "user" | "assistant" | "error"
 	timestamp: number
 	partial?: boolean
+	messageIndex?: number
+	streamId?: string
 }
 
 interface ClientSession {
@@ -22,6 +27,8 @@ interface ClientSession {
 	messages: ChatMessage[]
 	isActive: boolean
 	kilocodeToken?: string
+	currentTask?: any // Store the current Task instance
+	messageCounter: number // Track message sequence
 }
 
 export class SimpleWebServer {
@@ -29,10 +36,21 @@ export class SimpleWebServer {
 	private server = createServer(this.app)
 	private wss!: WebSocketServer
 	private clients = new Map<string, ClientSession>()
+	private firebaseService: FirebaseService
 
 	constructor() {
 		this.setupExpress()
 		this.setupWebSocket()
+		
+		// Initialize Firebase service - FATAL if it fails
+		try {
+			this.firebaseService = FirebaseService.getInstance()
+			console.log('[SimpleWebServer] Firebase service initialized successfully')
+		} catch (error) {
+			console.error('[SimpleWebServer] FATAL: Failed to initialize Firebase service:', error)
+			console.error('[SimpleWebServer] Firebase connection is required for server operation')
+			throw new Error(`FATAL: Firebase initialization failed: ${error}`)
+		}
 	}
 
 	private setupExpress() {
@@ -70,6 +88,7 @@ export class SimpleWebServer {
 				),
 			})
 		})
+
 	}
 
 	private setupWebSocket() {
@@ -85,6 +104,7 @@ export class SimpleWebServer {
 				ws,
 				messages: [],
 				isActive: true,
+				messageCounter: 0,
 			}
 
 			this.clients.set(clientId, session)
@@ -114,11 +134,29 @@ export class SimpleWebServer {
 
 			ws.on("close", () => {
 				console.log(`[SimpleWebServer] Client disconnected: ${clientId}`)
+				// Clean up any active tasks
+				const session = this.clients.get(clientId)
+				if (session?.currentTask) {
+					try {
+						session.currentTask.abortTask()
+					} catch (error) {
+						console.error(`[SimpleWebServer] Error aborting task for disconnected client:`, error)
+					}
+				}
 				this.clients.delete(clientId)
 			})
 
 			ws.on("error", (error) => {
 				console.error(`[SimpleWebServer] WebSocket error for ${clientId}:`, error)
+				// Clean up any active tasks
+				const session = this.clients.get(clientId)
+				if (session?.currentTask) {
+					try {
+						session.currentTask.abortTask()
+					} catch (error) {
+						console.error(`[SimpleWebServer] Error aborting task for errored client:`, error)
+					}
+				}
 				this.clients.delete(clientId)
 			})
 		})
@@ -131,8 +169,20 @@ export class SimpleWebServer {
 			case "new_task":
 				await this.handleNewTask(session, message.payload.text)
 				break
+			case "continue_task":
+				await this.handleContinueTask(session, message.payload.text, message.payload.taskId)
+				break
 			case "tool_approval":
 				await this.handleToolApproval(session, message.payload)
+				break
+			case "get_task_history":
+				await this.handleGetTaskHistory(session, message.payload)
+				break
+			case "get_task":
+				await this.handleGetTask(session, message.payload)
+				break
+			case "delete_task":
+				await this.handleDeleteTask(session, message.payload)
 				break
 			default:
 				console.warn(`[SimpleWebServer] Unhandled message type: ${message.type}`)
@@ -141,27 +191,34 @@ export class SimpleWebServer {
 
 	private async handleNewTask(session: ClientSession, text: string) {
 		try {
+			// Generate unique message ID
+			const messageId = `msg_${session.id}_${session.messageCounter++}_${Date.now()}`
+			
 			// Add user message to session
 			const userMessage: ChatMessage = {
-				id: Date.now().toString(),
+				id: messageId,
 				content: text,
 				type: "user",
 				timestamp: Date.now(),
+				messageIndex: session.messageCounter - 1,
 			}
 			session.messages.push(userMessage)
+
+			// Create a new task ID
+			const taskId = `task_${Date.now()}_${session.id}`
 
 			// Send task created confirmation
 			this.sendToClient(session, {
 				type: "task_created",
 				payload: {
-					taskId: `task_${Date.now()}`,
+					taskId,
 					mode: "code",
 					workspace: "/project",
 				},
 			})
 
-			// Simulate agent response for POC
-			await this.simulateAgentResponse(session, text)
+			// Create and store the task for continuous interaction
+			await this.createTaskForSession(session, text, taskId)
 		} catch (error) {
 			console.error("[SimpleWebServer] Error handling new task:", error)
 			this.sendToClient(session, {
@@ -171,7 +228,47 @@ export class SimpleWebServer {
 		}
 	}
 
-	private async simulateAgentResponse(session: ClientSession, userText: string) {
+	private async handleContinueTask(session: ClientSession, text: string, taskId: string) {
+		try {
+			// Generate unique message ID
+			const messageId = `msg_${session.id}_${session.messageCounter++}_${Date.now()}`
+			
+			// Add user message to session
+			const userMessage: ChatMessage = {
+				id: messageId,
+				content: text,
+				type: "user",
+				timestamp: Date.now(),
+				messageIndex: session.messageCounter - 1,
+			}
+			session.messages.push(userMessage)
+
+			// Add user message to Firebase
+			try {
+				await this.firebaseService.addMessageToTask(taskId, userMessage)
+			} catch (firebaseError) {
+				console.error(`[SimpleWebServer] Failed to add user message to Firebase:`, firebaseError)
+			}
+
+			// Continue with existing task or create new one if task doesn't exist
+			if (session.currentTask && session.currentTask.taskId === taskId) {
+				// Continue existing task by sending user message to it
+				await this.continueExistingTask(session, text)
+			} else {
+				// Task doesn't exist, create a new one
+				console.log(`[SimpleWebServer] Task ${taskId} not found, creating new task`)
+				await this.createTaskForSession(session, text, taskId)
+			}
+		} catch (error) {
+			console.error("[SimpleWebServer] Error handling continue task:", error)
+			this.sendToClient(session, {
+				type: "error",
+				payload: { message: "Failed to continue task" },
+			})
+		}
+	}
+
+	private async createTaskForSession(session: ClientSession, userText: string, taskId: string) {
 		try {
 			// Initialize Kilo Code token if not already done
 			if (!session.kilocodeToken) {
@@ -189,30 +286,6 @@ export class SimpleWebServer {
 				console.log(`[SimpleWebServer] Kilo Code token configured for session ${session.id}`)
 			}
 
-			// Create system prompt
-			const systemPrompt = `You are Kilo Code, a helpful AI assistant. You can help with coding tasks, answer questions, and provide explanations.
-
-For this web interface demonstration, respond naturally and helpfully to the user's request.`
-
-			// Convert session messages to Kilo Code API format
-			const apiMessages = session.messages
-				.filter((msg) => msg.type !== "error")
-				.map((msg) => ({
-					role: msg.type === "user" ? "user" : "assistant",
-					content: [{ type: "text", text: msg.content }],
-				}))
-
-			// Use shared Task orchestration instead of direct API calls
-			await this.streamWithTaskOrchestration(session, userText)
-		} catch (error) {
-			console.error("[SimpleWebServer] Error with Kilo Code API:", error)
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			await this.streamResponse(session, `I encountered an error: ${errorMessage}`)
-		}
-	}
-
-	private async streamWithTaskOrchestration(session: ClientSession, userText: string) {
-		try {
 			// Create provider configuration for KiloCode
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
@@ -228,18 +301,43 @@ For this web interface demonstration, respond naturally and helpfully to the use
 
 			// Create Task with orchestration
 			const task = new Task({
+				taskId,
 				apiConfiguration: providerConfig,
 				dependencies,
 				task: userText,
 			})
 
-			// Generate a single timestamp for this entire response stream
-			const responseTimestamp = Date.now()
+			// Store task in session for continuous interaction
+			session.currentTask = task
+
+			// Create Firebase task history entry (if Firebase is available)
+			if (this.firebaseService) {
+				const taskHistory: TaskHistory = {
+					taskId,
+					clientId: session.id,
+					messages: [...session.messages], // Include existing messages
+					createdAt: new Date(),
+					updatedAt: new Date(),
+					status: 'active'
+				}
+
+				try {
+					await this.firebaseService.saveTaskHistory(taskHistory)
+					console.log(`[SimpleWebServer] Task history saved to Firebase: ${taskId}`)
+				} catch (firebaseError) {
+					console.error(`[SimpleWebServer] Failed to save task history to Firebase:`, firebaseError)
+					// Continue without Firebase - don't fail the task
+				}
+			}
+
+			// Generate unique message ID for this response stream
+			const messageId = `msg_${taskId}_${session.messageCounter++}_${Date.now()}`
+			const streamId = `stream_${taskId}_${session.messageCounter}`
 
 			// Listen to task events and stream to client
-			task.on("message", (message) => {
+			task.on("message", async (message) => {
 				if (message.type === "say" && message.say === "text") {
-					// Use the same timestamp for all chunks in this response
+					// Send streaming chunk with consistent message ID
 					this.sendToClient(session, {
 						type: "stream_chunk",
 						payload: {
@@ -247,42 +345,120 @@ For this web interface demonstration, respond naturally and helpfully to the use
 							partial: message.partial || false,
 							messageType: "say",
 							say: "text",
-							ts: responseTimestamp, // Use consistent timestamp
+							ts: message.ts || Date.now(),
+							messageId,
+							streamId,
 						},
 					})
 
 					// Only add to session messages when complete
 					if (!message.partial) {
 						const assistantMessage: ChatMessage = {
-							id: responseTimestamp.toString(),
+							id: messageId,
 							content: message.text || "",
 							type: "assistant",
-							timestamp: responseTimestamp,
+							timestamp: message.ts || Date.now(),
+							messageIndex: session.messageCounter,
+							streamId,
 						}
 						session.messages.push(assistantMessage)
+
+						// Update Firebase with new message
+						try {
+							await this.firebaseService.addMessageToTask(taskId, assistantMessage)
+						} catch (firebaseError) {
+							console.error(`[SimpleWebServer] Failed to add message to Firebase:`, firebaseError)
+						}
 					}
 				}
 			})
 
-			task.on("completed", (result) => {
+			task.on("completed", async (result) => {
 				console.log(`[SimpleWebServer] Task completed: ${result}`)
+				
+				// Update Firebase task status
+				try {
+					await this.firebaseService.updateTaskStatus(taskId, 'completed')
+				} catch (firebaseError) {
+					console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
+				}
+
+				// Send task state update to indicate completion
+				this.sendToClient(session, {
+					type: "task_state",
+					payload: {
+						taskId,
+						status: "completed",
+						isStreaming: false,
+						enableButtons: false,
+					},
+				})
 			})
 
-			task.on("error", (error) => {
+			task.on("error", async (error) => {
 				console.error(`[SimpleWebServer] Task error: ${error}`)
+				
+				// Update Firebase task status
+				try {
+					await this.firebaseService.updateTaskStatus(taskId, 'error')
+				} catch (firebaseError) {
+					console.error(`[SimpleWebServer] Failed to update task status in Firebase:`, firebaseError)
+				}
+
 				this.sendToClient(session, {
 					type: "error",
 					payload: { message: error },
 				})
+				// Reset task state on error
+				this.sendToClient(session, {
+					type: "task_state",
+					payload: {
+						taskId,
+						status: "error",
+						isStreaming: false,
+						enableButtons: false,
+					},
+				})
 			})
 
-			console.log(`[SimpleWebServer] Started Task orchestration for session ${session.id}`)
+			console.log(`[SimpleWebServer] Created Task ${taskId} for session ${session.id}`)
 		} catch (error) {
-			console.error("[SimpleWebServer] Error with Task orchestration:", error)
+			console.error("[SimpleWebServer] Error creating task:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
-			await this.streamResponse(session, `Task orchestration error: ${errorMessage}`)
+			await this.streamResponse(session, `Task creation error: ${errorMessage}`)
 		}
 	}
+
+	private async continueExistingTask(session: ClientSession, userText: string) {
+		try {
+			if (!session.currentTask) {
+				throw new Error("No current task to continue")
+			}
+
+			// Send the user message to the existing task
+			await session.currentTask.setMessageResponse(userText)
+			
+			console.log(`[SimpleWebServer] Continued task ${session.currentTask.taskId} for session ${session.id}`)
+		} catch (error) {
+			console.error("[SimpleWebServer] Error continuing task:", error)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			await this.streamResponse(session, `Task continuation error: ${errorMessage}`)
+		}
+	}
+
+	private async simulateAgentResponse(session: ClientSession, userText: string) {
+		try {
+			// This method is now deprecated in favor of createTaskForSession
+			// Keeping for backward compatibility
+			const taskId = `task_${Date.now()}`
+			await this.createTaskForSession(session, userText, taskId)
+		} catch (error) {
+			console.error("[SimpleWebServer] Error with agent response:", error)
+			const errorMessage = error instanceof Error ? error.message : String(error)
+			await this.streamResponse(session, `I encountered an error: ${errorMessage}`)
+		}
+	}
+
 
 	private async streamWithSharedApiHandler(
 		session: ClientSession,
@@ -543,6 +719,86 @@ For this web interface demonstration, respond naturally and helpfully to the use
 				session,
 				"I understand you don't want me to proceed with that operation. What would you like me to do instead?",
 			)
+		}
+	}
+
+	private async handleGetTaskHistory(session: ClientSession, payload: any) {
+		try {
+			const limit = payload.limit || 50
+			const taskHistory = await this.firebaseService.getClientTaskHistory(session.id, limit)
+			
+			this.sendToClient(session, {
+				type: "task_history_response",
+				payload: {
+					success: true,
+					tasks: taskHistory,
+					requestId: payload.requestId,
+				},
+			})
+		} catch (error) {
+			console.error("[SimpleWebServer] Error fetching task history:", error)
+			this.sendToClient(session, {
+				type: "task_history_response",
+				payload: {
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+					requestId: payload.requestId,
+				},
+			})
+		}
+	}
+
+	private async handleGetTask(session: ClientSession, payload: any) {
+		try {
+			const { taskId } = payload
+			const taskHistory = await this.firebaseService.getTaskHistory(taskId)
+			
+			this.sendToClient(session, {
+				type: "task_response",
+				payload: {
+					success: true,
+					task: taskHistory,
+					requestId: payload.requestId,
+				},
+			})
+		} catch (error) {
+			console.error("[SimpleWebServer] Error fetching task:", error)
+			this.sendToClient(session, {
+				type: "task_response",
+				payload: {
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+					requestId: payload.requestId,
+				},
+			})
+		}
+	}
+
+	private async handleDeleteTask(session: ClientSession, payload: any) {
+		try {
+			const { taskId } = payload
+			// Note: Firebase doesn't have a built-in delete method in our service
+			// We could implement soft delete by updating status to 'deleted'
+			await this.firebaseService.updateTaskStatus(taskId, 'deleted' as any)
+			
+			this.sendToClient(session, {
+				type: "task_deleted_response",
+				payload: {
+					success: true,
+					taskId,
+					requestId: payload.requestId,
+				},
+			})
+		} catch (error) {
+			console.error("[SimpleWebServer] Error deleting task:", error)
+			this.sendToClient(session, {
+				type: "task_deleted_response",
+				payload: {
+					success: false,
+					error: error instanceof Error ? error.message : String(error),
+					requestId: payload.requestId,
+				},
+			})
 		}
 	}
 

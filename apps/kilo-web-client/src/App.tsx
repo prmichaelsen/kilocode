@@ -25,6 +25,8 @@ interface ChatMessage {
 	partial?: boolean
 	ask?: string
 	say?: string
+	messageIndex?: number // Add sequence number for better correlation
+	streamId?: string // Add unique stream identifier
 }
 
 interface TaskState {
@@ -64,7 +66,10 @@ export default function App() {
 		isStreaming: false,
 		enableButtons: false,
 	})
+	const [currentTaskId, setCurrentTaskId] = useState<string | null>(null)
 	const [clientId, setClientId] = useState<string>("")
+	const [messageCounter, setMessageCounter] = useState(0)
+	const [activeStreamIds, setActiveStreamIds] = useState<Set<string>>(new Set())
 
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -156,11 +161,18 @@ export default function App() {
 		}
 
 		if (isStreamChunkMessage(message)) {
-			const { content, partial, messageType, ask, say, ts } = message.payload
+			const { content, partial, messageType, ask, say, ts, messageId, streamId } = message.payload
 
 			setMessages((prev) => {
-				// Find existing message with same timestamp for streaming updates
-				const existingIndex = prev.findIndex((msg) => msg.id === ts.toString())
+				// Use server-provided streamId if available, otherwise generate one
+				const effectiveStreamId = streamId || `${currentTaskId || 'unknown'}_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
+				const effectiveMessageId = messageId || `msg_${ts}_${Math.random().toString(36).substr(2, 9)}`
+				
+				// Find existing message with same stream ID for streaming updates
+				const existingIndex = prev.findIndex((msg) =>
+					(msg.streamId === effectiveStreamId && msg.partial !== false) ||
+					(msg.id === effectiveMessageId && msg.partial !== false)
+				)
 
 				if (existingIndex !== -1) {
 					// Update existing message with new content (replace, don't append)
@@ -170,23 +182,47 @@ export default function App() {
 									...msg,
 									content: content, // Replace content entirely for clean streaming
 									partial,
+									timestamp: ts, // Update timestamp to latest
 								}
 							: msg,
 					)
 				} else {
-					// Add new message
+					// Add new message with server-provided IDs
 					const newMessage: ChatMessage = {
-						id: ts.toString(),
+						id: effectiveMessageId,
 						content: content,
 						type: messageType === "ask" ? "assistant" : "assistant",
 						timestamp: ts,
 						partial,
 						ask,
 						say,
+						messageIndex: prev.length,
+						streamId: effectiveStreamId,
 					}
 					return [...prev, newMessage]
 				}
 			})
+			
+			// Update task state when streaming completes
+			if (!partial) {
+				setTaskState((prev) => ({
+					...prev,
+					isStreaming: false,
+					status: "idle" // Reset to idle when streaming completes
+				}))
+				
+				// Remove from active stream IDs when complete
+				const effectiveStreamId = streamId || `${currentTaskId || 'unknown'}_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
+				setActiveStreamIds(prev => {
+					const newSet = new Set(prev)
+					newSet.delete(effectiveStreamId)
+					return newSet
+				})
+			} else {
+				// Add to active stream IDs when streaming
+				const effectiveStreamId = streamId || `${currentTaskId || 'unknown'}_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
+				setActiveStreamIds(prev => new Set(prev).add(effectiveStreamId))
+			}
 			return
 		}
 
@@ -199,6 +235,9 @@ export default function App() {
 				primaryButtonText: message.payload.primaryButtonText,
 				secondaryButtonText: message.payload.secondaryButtonText,
 			})
+			
+			// Update current task ID when task state changes
+			setCurrentTaskId(message.payload.taskId)
 			return
 		}
 
@@ -221,19 +260,30 @@ export default function App() {
 			return
 		}
 
+		const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+		const currentMessageIndex = messageCounter
+		
 		const userMessage: ChatMessage = {
-			id: Date.now().toString(),
+			id: messageId,
 			content: input,
 			type: "user",
 			timestamp: Date.now(),
+			messageIndex: currentMessageIndex,
 		}
 
 		setMessages((prev) => [...prev, userMessage])
+		setMessageCounter(prev => prev + 1)
 
-		// Send new task message to server
+		// Determine message type based on whether we have an active task
+		const messageType = currentTaskId ? "continue_task" : "new_task"
+		
 		const message = {
-			type: "new_task",
-			payload: { text: input },
+			type: messageType,
+			payload: {
+				text: input,
+				taskId: currentTaskId, // Include taskId for continuing tasks
+				messageIndex: currentMessageIndex // Include message sequence
+			},
 			requestId: clientId,
 			timestamp: Date.now(),
 		}
@@ -326,10 +376,10 @@ export default function App() {
 						<div
 							className={`px-2 md:px-4 py-3 ${
 								message.type === "user"
-									? "bg-blue-600 text-white max-w-xs lg:max-w-md rounded-lg rounded md:rounded-lg"
+									? "bg-blue-600 text-white max-w-xs lg:max-w-md rounded-lg mx-2 md:mx-0"
 									: message.type === "error"
-										? "bg-red-900 text-red-200 border border-red-700 w-full rounded md:rounded-lg"
-										: "bg-gray-800 text-gray-100 border border-gray-700 w-full rounded md:rounded-lg"
+										? "bg-red-900 text-red-200 border border-red-700 w-full rounded-none md:rounded-lg"
+										: "bg-gray-800 text-gray-100 border border-gray-700 w-full rounded-none md:rounded-lg"
 							}`}>
 							<div className="text-xs opacity-70 mb-2">
 								{message.type === "user" ? "You" : "Assistant"}

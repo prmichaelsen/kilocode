@@ -66,6 +66,8 @@ export interface StreamChunkMessage extends BaseWebSocketMessage {
 			params: Record<string, any>
 		}
 		ts: number
+		messageId?: string // Add unique message identifier
+		streamId?: string // Add stream correlation identifier
 	}
 }
 
