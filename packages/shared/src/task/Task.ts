@@ -550,18 +550,27 @@ export class Task extends EventEmitter<TaskEvents> {
 			if (this.contextCondenser.shouldCondenseContext(this.apiConversationHistory, currentTokens)) {
 				console.log(`[Task] Context condensation triggered - ${this.apiConversationHistory.length} messages, ~${currentTokens} tokens`)
 				
+				// Notify user that condensation is starting
+				await this.say("text", "🔄 Condensing conversation context to optimize token usage...", undefined, false)
+				
 				try {
 					const result = await this.contextCondenser.condenseContext(this.apiConversationHistory)
 					
 					if (result.condensed && result.condensedHistory) {
 						console.log(`[Task] Context condensed: ${result.originalTokens} -> ${result.condensedTokens} tokens (${Math.round(result.compressionRatio * 100)}% compression)`)
 						this.apiConversationHistory = result.condensedHistory
+						this.condensationCount++
+						this.lastCondensationRatio = result.compressionRatio
 						
 						// Save condensed history immediately
 						await this.saveApiConversationHistory()
+						
+						// Notify user of successful condensation
+						await this.say("text", `✅ Context condensed: ${result.originalTokens} → ${result.condensedTokens} tokens (${Math.round(result.compressionRatio * 100)}% compression)`, undefined, false)
 					}
 				} catch (error) {
 					console.error(`[Task] Context condensation failed:`, error)
+					await this.say("error", `⚠️ Context condensation failed: ${error instanceof Error ? error.message : String(error)}`)
 					// Continue without condensation if it fails
 				}
 			}

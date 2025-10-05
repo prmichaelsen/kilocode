@@ -614,10 +614,10 @@ export default function App() {
 	}
 
 	return (
-		<div className="flex h-screen bg-gray-900 text-gray-100">
+		<div className="flex h-screen bg-gray-900 text-gray-100 overflow-hidden">
 			{/* Task History Sidebar */}
 			{isHistoryOpen && (
-				<div className="w-[90vw] md:w-80 bg-gray-800 border-r border-gray-700 flex flex-col">
+				<div className="w-[90vw] md:w-80 bg-gray-800 border-r border-gray-700 flex flex-col overflow-hidden">
 					{/* History Header */}
 					<div className="p-4 border-b border-gray-700">
 						<div className="flex justify-between items-center">
@@ -682,9 +682,9 @@ export default function App() {
 			)}
 
 			{/* Main Chat Area */}
-			<div className="flex flex-col flex-1">
+			<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 				{/* Header */}
-				<div className="bg-gray-800 border-b border-gray-700 p-4">
+				<div className="bg-gray-800 border-b border-gray-700 p-4 overflow-hidden">
 					<div className="flex justify-between items-center">
 						<div className="flex items-center gap-3">
 							<button
@@ -747,7 +747,7 @@ export default function App() {
 				</div>
 
 			{/* Messages */}
-			<div className="flex-1 overflow-y-auto p-0 md:p-4 space-y-4">
+			<div className="flex-1 overflow-y-auto overflow-x-hidden p-0 md:p-4 space-y-4">
 				{messages.length === 0 && (
 					<div className="text-center text-gray-400 mt-8">
 						<h2 className="text-lg font-medium mb-2">Welcome to Kilo Code Web</h2>
@@ -759,14 +759,14 @@ export default function App() {
 				{messages.map((message) => (
 					<div
 						key={message.id}
-						className={`${message.type === "user" ? "flex justify-end" : "w-full"}`}>
+						className={`${message.type === "user" ? "flex justify-end" : "w-full"} min-w-0`}>
 						<div
-							className={`px-2 md:px-4 py-3 ${
+							className={`px-2 md:px-4 py-3 min-w-0 ${
 								message.type === "user"
-									? "bg-blue-600 text-white max-w-xs lg:max-w-md rounded-lg mx-2 md:mx-0"
+									? "bg-blue-600 text-white max-w-xs lg:max-w-md rounded-lg mx-2 md:mx-0 break-words"
 									: message.type === "error"
-										? "bg-red-900 text-red-200 border border-red-700 w-full rounded-none md:rounded-lg"
-										: "bg-gray-800 text-gray-100 border border-gray-700 w-full rounded-none md:rounded-lg"
+										? "bg-red-900 text-red-200 border border-red-700 w-full rounded-none md:rounded-lg break-words"
+										: "bg-gray-800 text-gray-100 border border-gray-700 w-full rounded-none md:rounded-lg break-words"
 							}`}>
 							<div className="text-xs opacity-70 mb-2">
 								{message.type === "user" ? "You" : "Assistant"}
@@ -774,38 +774,38 @@ export default function App() {
 								{message.say && ` (${message.say})`}
 								{message.partial && " • Streaming..."}
 							</div>
-							<div className="text-sm">
+							<div className="text-sm overflow-hidden">
 								<ReactMarkdown
 									components={{
 										code: ({ className, children, ...props }) => {
 											const isInline = !className?.includes("language-")
 											return isInline ? (
 												<code
-													className="bg-gray-700 text-gray-200 px-1 py-0.5 rounded text-xs font-mono"
+													className="bg-gray-700 text-gray-200 px-1 py-0.5 rounded text-xs font-mono break-all"
 													{...props}>
 													{children}
 												</code>
 											) : (
-												<pre className="bg-gray-900 border border-gray-600 p-3 rounded-lg overflow-x-auto mt-2 mb-2">
-													<code className="text-xs font-mono text-gray-200" {...props}>
+												<pre className="bg-gray-900 border border-gray-600 p-3 rounded-lg overflow-x-auto mt-2 mb-2 max-w-full">
+													<code className="text-xs font-mono text-gray-200 whitespace-pre" {...props}>
 														{children}
 													</code>
 												</pre>
 											)
 										},
-										p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+										p: ({ children }) => <p className="mb-2 last:mb-0 break-words overflow-wrap-anywhere">{children}</p>,
 										ul: ({ children }) => (
-											<ul className="list-disc list-inside mb-2 text-gray-200">{children}</ul>
+											<ul className="list-disc list-inside mb-2 text-gray-200 break-words">{children}</ul>
 										),
 										ol: ({ children }) => (
-											<ol className="list-decimal list-inside mb-2 text-gray-200">{children}</ol>
+											<ol className="list-decimal list-inside mb-2 text-gray-200 break-words">{children}</ol>
 										),
-										li: ({ children }) => <li className="mb-1">{children}</li>,
-										h1: ({ children }) => <h1 className="text-lg font-bold mb-2 text-gray-100">{children}</h1>,
+										li: ({ children }) => <li className="mb-1 break-words">{children}</li>,
+										h1: ({ children }) => <h1 className="text-lg font-bold mb-2 text-gray-100 break-words">{children}</h1>,
 										h2: ({ children }) => (
-											<h2 className="text-md font-semibold mb-2 text-gray-100">{children}</h2>
+											<h2 className="text-md font-semibold mb-2 text-gray-100 break-words">{children}</h2>
 										),
-										h3: ({ children }) => <h3 className="text-sm font-medium mb-1 text-gray-200">{children}</h3>,
+										h3: ({ children }) => <h3 className="text-sm font-medium mb-1 text-gray-200 break-words">{children}</h3>,
 									}}>
 									{message.content}
 								</ReactMarkdown>
@@ -816,8 +816,8 @@ export default function App() {
 
 				{/* Thinking bubble when task is streaming */}
 				{taskState.isStreaming && taskState.status === "running" && (
-					<div className="w-full">
-						<div className="bg-gray-800 text-gray-100 border border-gray-700 w-full rounded-none md:rounded-lg px-2 md:px-4 py-3">
+					<div className="w-full min-w-0">
+						<div className="bg-gray-800 text-gray-100 border border-gray-700 w-full rounded-none md:rounded-lg px-2 md:px-4 py-3 overflow-hidden">
 							<div className="text-xs opacity-70 mb-2">
 								Assistant
 							</div>
@@ -862,8 +862,8 @@ export default function App() {
 			)}
 
 			{/* Input */}
-			<div className="border-t border-gray-700 bg-gray-800 p-3 md:p-4">
-				<div className="flex gap-2">
+			<div className="border-t border-gray-700 bg-gray-800 p-3 md:p-4 overflow-hidden">
+				<div className="flex gap-2 min-w-0">
 					<textarea
 						ref={inputRef as any}
 						value={input}

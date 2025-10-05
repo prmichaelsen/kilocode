@@ -389,7 +389,7 @@ export class SimpleWebServer {
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-sonnet-4:experimental",
+				kilocodeModel: process.env.KILOCODE_MODEL || "anthropic/claude-sonnet-4.5:experimental",
 			}
 
 			// Load working directory from Firebase for persistent task or use default
@@ -412,7 +412,7 @@ export class SimpleWebServer {
 			
 			const dependencies: TaskDependencies = {
 				workspacePath,
-				globalStoragePath: "/tmp/notebin-storage", // Use temp directory for storage
+				globalStoragePath: "/home/prmichaelsen/notebin/storage", // Use temp directory for storage
 				fileSystem: fileSystemAdapter,
 				terminalAdapter,
 				storage: storageAdapter,
@@ -746,7 +746,7 @@ export class SimpleWebServer {
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-sonnet-4:experimental",
+				kilocodeModel: process.env.KILOCODE_MODEL || "anthropic/claude-sonnet-4.5:experimental",
 			}
 
 			// Load working directory from Firebase or use default
@@ -846,7 +846,7 @@ export class SimpleWebServer {
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-sonnet-4:experimental",
+				kilocodeModel: process.env.KILOCODE_MODEL || "anthropic/claude-sonnet-4.5:experimental",
 			}
 
 			// Create API handler using shared buildApiHandler
@@ -935,7 +935,7 @@ export class SimpleWebServer {
 
 			// Prepare request payload
 			const payload = {
-				model: "anthropic/claude-sonnet-4:experimental", // Default Kilo Code model
+				model: process.env.KILOCODE_MODEL || "anthropic/claude-sonnet-4.5:experimental",
 				messages: [{ role: "system", content: systemPrompt }, ...apiMessages],
 				stream: true,
 				max_tokens: 4096,
