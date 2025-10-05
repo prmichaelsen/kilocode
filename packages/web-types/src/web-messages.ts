@@ -71,30 +71,6 @@ export interface DeleteTaskMessage extends BaseWebSocketMessage {
 	}
 }
 
-// Task Interruption & Control Messages
-export interface InterruptTaskMessage extends BaseWebSocketMessage {
-	type: "interrupt_task"
-	payload: {
-		taskId: string
-		reason?: string
-	}
-}
-
-export interface HaltTaskMessage extends BaseWebSocketMessage {
-	type: "halt_task"
-	payload: {
-		taskId: string
-		reason?: string
-	}
-}
-
-export interface ResumeInterruptedTaskMessage extends BaseWebSocketMessage {
-	type: "resume_interrupted_task"
-	payload: {
-		taskId: string
-	}
-}
-
 // Server to Client Messages
 export interface TaskCreatedMessage extends BaseWebSocketMessage {
 	type: "task_created"

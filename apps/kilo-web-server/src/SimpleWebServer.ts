@@ -38,7 +38,6 @@ interface ClientSession {
 	storageAdapter?: FirebaseTaskStorageAdapter // Storage adapter for conversation persistence
 	messageQueue: Array<{ message: any; resolve: Function; reject: Function }> // Message queue for ordering
 	isProcessingMessage: boolean // Flag to prevent concurrent message processing
-	pendingInterrupt?: { taskId: string; reason: string } // Track pending interrupts
 	persistentTaskId: string // Fixed task ID for the persistent task
 }
 
@@ -180,18 +179,9 @@ export class SimpleWebServer {
 		})
 	}
 
-	// Enhanced message queueing system with priority handling
+	// Message queueing system
 	private async queueMessage(session: ClientSession, message: any): Promise<void> {
 		return new Promise((resolve, reject) => {
-			// Special handling for interrupt messages
-			if (message.type === 'interrupt_task') {
-				// Store pending interrupt to coordinate with continue messages
-				session.pendingInterrupt = {
-					taskId: message.payload.taskId,
-					reason: message.payload.reason
-				}
-			}
-			
 			session.messageQueue.push({ message, resolve, reject })
 			
 			this.processMessageQueue(session)
@@ -213,28 +203,6 @@ export class SimpleWebServer {
 				const { message, resolve, reject } = session.messageQueue.shift()!
 				
 				try {
-					// Special coordination for continue_task messages after interrupts
-					if (message.type === 'continue_task' && session.pendingInterrupt) {
-						const interrupt = session.pendingInterrupt
-						
-						// Check if this continue message is for the same task that was interrupted
-						if (message.payload.taskId === interrupt.taskId) {
-							console.log(`[SimpleWebServer] Coordinating interrupt and continue for task ${interrupt.taskId}`)
-							
-							// First handle the interrupt
-							await this.handleInterruptTask(session, {
-								taskId: interrupt.taskId,
-								reason: interrupt.reason
-							})
-							
-							// Clear the pending interrupt
-							session.pendingInterrupt = undefined
-							
-							// Small delay to ensure interrupt is processed
-							await new Promise(resolve => setTimeout(resolve, 100))
-						}
-					}
-					
 					await this.handleClientMessage(session, message)
 					resolve()
 				} catch (error) {
@@ -268,15 +236,6 @@ export class SimpleWebServer {
 				break
 			case "delete_task":
 				await this.handleDeleteTask(session, message.payload)
-				break
-			case "interrupt_task":
-				await this.handleInterruptTask(session, message.payload)
-				break
-			case "halt_task":
-				await this.handleHaltTask(session, message.payload)
-				break
-			case "resume_interrupted_task":
-				await this.handleResumeInterruptedTask(session, message.payload)
 				break
 			default:
 				console.warn(`[SimpleWebServer] Unhandled message type: ${message.type}`)
@@ -622,61 +581,6 @@ export class SimpleWebServer {
 			// Clear the aborted task from session so it gets recreated on next message
 			session.persistentTask = undefined
 		})
-
-		// Task Interruption & Control event listeners
-		task.on("interrupted", async (reason: string) => {
-			console.log(`[SimpleWebServer] Task interrupted: ${reason}`)
-			
-			// SIMPLE FIX: Don't send task_interrupted message to client
-			// Just update the task state, no chat message needed
-			
-			// Update task state to show interruption
-			this.sendToClient(session, {
-				type: "task_state",
-				payload: {
-					taskId,
-					status: "interrupted",
-					isStreaming: false,
-					enableButtons: true, // Enable resume button
-				},
-			})
-		})
-
-		task.on("halted", async (reason: string) => {
-			console.log(`[SimpleWebServer] Task halted: ${reason}`)
-			
-			// SIMPLE FIX: Don't send task_halted message to client
-			// Just update the task state, no chat message needed
-			
-			// Update task state to show halt
-			this.sendToClient(session, {
-				type: "task_state",
-				payload: {
-					taskId,
-					status: "halted",
-					isStreaming: false,
-					enableButtons: true, // Enable resume button
-				},
-			})
-		})
-
-		task.on("resumed", async () => {
-			console.log(`[SimpleWebServer] Task resumed`)
-			
-			// SIMPLE FIX: Don't send task_resumed message to client
-			// Just update the task state, no chat message needed
-			
-			// Update task state to show active
-			this.sendToClient(session, {
-				type: "task_state",
-				payload: {
-					taskId,
-					status: "active",
-					isStreaming: false,
-					enableButtons: false,
-				},
-			})
-		})
 	}
 
 	private async continueExistingTask(session: ClientSession, userText: string) {
@@ -691,9 +595,12 @@ export class SimpleWebServer {
 			console.log(`[SimpleWebServer] Continuing persistent task ${taskId} with conversation context`)
 
 			// Use the new continueConversation method to maintain context
+			// DON'T await - let it run in background so new messages can interrupt
 			if (task.continueConversation) {
-				await task.continueConversation(userText)
-				console.log(`[SimpleWebServer] Continued conversation for persistent task ${taskId}`)
+				task.continueConversation(userText).catch((error) => {
+					console.error(`[SimpleWebServer] Error in background conversation for task ${taskId}:`, error)
+				})
+				console.log(`[SimpleWebServer] Started conversation continuation for persistent task ${taskId}`)
 			} else if (task.setMessageResponse) {
 				// Fallback to setMessageResponse for compatibility
 				task.setMessageResponse(userText)
@@ -1200,188 +1107,6 @@ export class SimpleWebServer {
 			console.error("[SimpleWebServer] Error deleting task:", error)
 			this.sendToClient(session, {
 				type: "task_deleted_response",
-				payload: {
-					success: false,
-					error: error instanceof Error ? error.message : String(error),
-					requestId: payload.requestId,
-				},
-			})
-		}
-	}
-
-	private async handleInterruptTask(session: ClientSession, payload: any) {
-		try {
-			const { taskId, reason = "User interrupted task" } = payload
-			
-			console.log(`[SimpleWebServer] Interrupting task ${taskId}: ${reason}`)
-			
-			// If persistent task is not loaded, fetch it from Firebase and preload it
-			if (!session.persistentTask && "main" === taskId) {
-				console.log(`[SimpleWebServer] Persistent task not loaded, fetching from Firebase: ${taskId}`)
-				try {
-					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
-					if (taskHistory) {
-						// Preload the task from Firebase
-						await this.resumeTaskFromFirebase(session, taskHistory, "")
-						console.log(`[SimpleWebServer] Successfully preloaded task ${taskId} from Firebase`)
-					}
-				} catch (preloadError) {
-					console.error(`[SimpleWebServer] Failed to preload task ${taskId}:`, preloadError)
-				}
-			}
-			
-			if (session.persistentTask && "main" === taskId) {
-				await session.persistentTask.interruptTask(reason)
-				
-				this.sendToClient(session, {
-					type: "task_interrupted_response",
-					payload: {
-						success: true,
-						taskId,
-						reason,
-						requestId: payload.requestId,
-					},
-				})
-			} else {
-				// If we still can't find the task after attempting to preload
-				console.log(`[SimpleWebServer] Task ${taskId} not found even after preload attempt`)
-				this.sendToClient(session, {
-					type: "task_interrupted_response",
-					payload: {
-						success: true, // Report success since there's nothing to interrupt
-						taskId,
-						reason: "Task not available for interruption",
-						requestId: payload.requestId,
-					},
-				})
-			}
-		} catch (error) {
-			console.error("[SimpleWebServer] Error interrupting task:", error)
-			this.sendToClient(session, {
-				type: "task_interrupted_response",
-				payload: {
-					success: false,
-					error: error instanceof Error ? error.message : String(error),
-					requestId: payload.requestId,
-				},
-			})
-		}
-	}
-
-	private async handleHaltTask(session: ClientSession, payload: any) {
-		try {
-			const { taskId, reason = "Task halted by user" } = payload
-			
-			console.log(`[SimpleWebServer] Halting task ${taskId}: ${reason}`)
-			
-			// If persistent task is not loaded, fetch it from Firebase and preload it
-			if (!session.persistentTask && "main" === taskId) {
-				console.log(`[SimpleWebServer] Persistent task not loaded, fetching from Firebase: ${taskId}`)
-				try {
-					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
-					if (taskHistory) {
-						await this.resumeTaskFromFirebase(session, taskHistory, "")
-						console.log(`[SimpleWebServer] Successfully preloaded task ${taskId} from Firebase`)
-					}
-				} catch (preloadError) {
-					console.error(`[SimpleWebServer] Failed to preload task ${taskId}:`, preloadError)
-				}
-			}
-			
-			if (session.persistentTask && "main" === taskId) {
-				await session.persistentTask.haltTask(reason)
-				
-				// Update Firebase task status
-				this.firebaseService.updateTaskStatus(taskId, 'halted' as any).catch(firebaseError => {
-					console.error(`[SimpleWebServer] Failed to update task status to halted in Firebase for task ${taskId}:`, firebaseError)
-				})
-				
-				this.sendToClient(session, {
-					type: "task_halted_response",
-					payload: {
-						success: true,
-						taskId,
-						reason,
-						requestId: payload.requestId,
-					},
-				})
-			} else {
-				console.log(`[SimpleWebServer] Task ${taskId} not found even after preload attempt`)
-				this.sendToClient(session, {
-					type: "task_halted_response",
-					payload: {
-						success: true,
-						taskId,
-						reason: "Task not available for halting",
-						requestId: payload.requestId,
-					},
-				})
-			}
-		} catch (error) {
-			console.error("[SimpleWebServer] Error halting task:", error)
-			this.sendToClient(session, {
-				type: "task_halted_response",
-				payload: {
-					success: false,
-					error: error instanceof Error ? error.message : String(error),
-					requestId: payload.requestId,
-				},
-			})
-		}
-	}
-
-	private async handleResumeInterruptedTask(session: ClientSession, payload: any) {
-		try {
-			const { taskId } = payload
-			
-			console.log(`[SimpleWebServer] Resuming interrupted task ${taskId}`)
-			
-			// If persistent task is not loaded, fetch it from Firebase and preload it
-			if (!session.persistentTask && "main" === taskId) {
-				console.log(`[SimpleWebServer] Persistent task not loaded, fetching from Firebase: ${taskId}`)
-				try {
-					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
-					if (taskHistory) {
-						await this.resumeTaskFromFirebase(session, taskHistory, "")
-						console.log(`[SimpleWebServer] Successfully preloaded task ${taskId} from Firebase`)
-					}
-				} catch (preloadError) {
-					console.error(`[SimpleWebServer] Failed to preload task ${taskId}:`, preloadError)
-				}
-			}
-			
-			if (session.persistentTask && "main" === taskId) {
-				await session.persistentTask.resumeTask()
-				
-				// Update Firebase task status
-				this.firebaseService.updateTaskStatus(taskId, 'active').catch(firebaseError => {
-					console.error(`[SimpleWebServer] Failed to update task status to active in Firebase for task ${taskId}:`, firebaseError)
-				})
-				
-				this.sendToClient(session, {
-					type: "task_resumed_response",
-					payload: {
-						success: true,
-						taskId,
-						requestId: payload.requestId,
-					},
-				})
-			} else {
-				console.log(`[SimpleWebServer] Task ${taskId} not found even after preload attempt`)
-				this.sendToClient(session, {
-					type: "task_resumed_response",
-					payload: {
-						success: true,
-						taskId,
-						reason: "Task not available for resuming",
-						requestId: payload.requestId,
-					},
-				})
-			}
-		} catch (error) {
-			console.error("[SimpleWebServer] Error resuming interrupted task:", error)
-			this.sendToClient(session, {
-				type: "task_resumed_response",
 				payload: {
 					success: false,
 					error: error instanceof Error ? error.message : String(error),

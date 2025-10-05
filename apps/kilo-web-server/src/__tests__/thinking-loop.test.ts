@@ -22,6 +22,8 @@ describe('Thinking Loop Prevention', () => {
       interrupted: false,
       isStreaming: false,
       interruptReason: undefined,
+      hasPendingUserMessage: false,
+      pendingUserContent: undefined,
       
       // Mock methods
       interruptTask: vi.fn(async (reason: string) => {
@@ -31,35 +33,46 @@ describe('Thinking Loop Prevention', () => {
       
       isInterrupted: vi.fn(() => mockTask.interrupted),
       
-      continueConversation: vi.fn(async (text: string) => {
+      continueConversation: vi.fn(async (text: string, images?: string[]) => {
+        // Set pending message flag
+        mockTask.hasPendingUserMessage = true
+        mockTask.pendingUserContent = [{ type: 'text', text }]
+        
         if (mockTask.interrupted) {
           mockTask.interrupted = false
           mockTask.interruptReason = undefined
           mockTask.abort = false
         }
+        
+        // Simulate processing the message
+        await new Promise(resolve => setTimeout(resolve, 10))
+        
+        // Clear pending message flag after processing
+        mockTask.hasPendingUserMessage = false
+        mockTask.pendingUserContent = undefined
       }),
       
-      // Mock executeToolsInMessage with interruption checks
+      // Mock executeToolsInMessage with interruption and pending message checks
       executeToolsInMessage: vi.fn(async (message: string) => {
         const toolResults: string[] = []
         
-        // Simulate checking for interruption before each tool
+        // Simulate checking for interruption and pending messages before each tool
         if (message.includes('read_file')) {
-          if (mockTask.abort || mockTask.interrupted) {
+          if (mockTask.abort || mockTask.interrupted || mockTask.hasPendingUserMessage) {
             return 'Tool Execution Interrupted: Task was interrupted during tool execution.'
           }
           toolResults.push('read_file Result: File content loaded')
         }
         
         if (message.includes('execute_command')) {
-          if (mockTask.abort || mockTask.interrupted) {
+          if (mockTask.abort || mockTask.interrupted || mockTask.hasPendingUserMessage) {
             return 'Tool Execution Interrupted: Task was interrupted during tool execution.'
           }
           toolResults.push('execute_command Result: Command executed')
         }
         
         if (message.includes('write_to_file')) {
-          if (mockTask.abort || mockTask.interrupted) {
+          if (mockTask.abort || mockTask.interrupted || mockTask.hasPendingUserMessage) {
             return 'Tool Execution Interrupted: Task was interrupted during tool execution.'
           }
           toolResults.push('write_to_file Result: File written')
@@ -68,19 +81,19 @@ describe('Thinking Loop Prevention', () => {
         return toolResults.join('\n\n')
       }),
       
-      // Mock initiateTaskLoop with interruption checks
+      // Mock initiateTaskLoop with interruption and pending message checks
       initiateTaskLoop: vi.fn(async (userContent: any[]) => {
         let iterations = 0
         const maxIterations = 10
         
-        while (!mockTask.abort && !mockTask.interrupted && iterations < maxIterations) {
+        while (!mockTask.abort && !mockTask.interrupted && !mockTask.hasPendingUserMessage && iterations < maxIterations) {
           iterations++
           
           // Simulate some processing time
           await new Promise(resolve => setTimeout(resolve, 10))
           
-          // Check for interruption between iterations
-          if (mockTask.interrupted || mockTask.abort) {
+          // Check for interruption and pending messages between iterations
+          if (mockTask.interrupted || mockTask.abort || mockTask.hasPendingUserMessage) {
             break
           }
           
@@ -178,5 +191,58 @@ describe('Thinking Loop Prevention', () => {
 
     // Task should be in clean state
     expect(mockTask.abort).toBe(false)
+  })
+
+  test('should interrupt autonomous loop when user message arrives', async () => {
+    // Start the autonomous task loop
+    const loopPromise = mockTask.initiateTaskLoop([
+      { type: 'text', text: 'Start autonomous loop' }
+    ])
+
+    // Send a user message during the loop
+    setTimeout(() => {
+      mockTask.continueConversation('User interrupts with new message')
+    }, 15)
+
+    const iterations = await loopPromise
+
+    // Loop should have stopped due to pending user message
+    expect(iterations).toBeLessThan(3) // Should stop before completing all iterations
+    expect(mockTask.hasPendingUserMessage).toBe(false) // Should be cleared after processing
+  })
+
+  test('should prioritize user message over autonomous execution', async () => {
+    // Start autonomous loop
+    const loopPromise = mockTask.initiateTaskLoop([
+      { type: 'text', text: 'Autonomous task' }
+    ])
+
+    // Immediately send user message
+    const userMessagePromise = mockTask.continueConversation('Priority user message')
+
+    // Wait for both to complete
+    await Promise.all([loopPromise, userMessagePromise])
+
+    // User message should have been processed
+    expect(mockTask.hasPendingUserMessage).toBe(false)
+    expect(mockTask.continueConversation).toHaveBeenCalledWith('Priority user message')
+  })
+
+  test('should check for pending messages during tool execution', async () => {
+    const multiToolMessage = 'read_file file1.txt, execute_command ls, write_to_file output.txt'
+
+    // Start tool execution
+    const executionPromise = mockTask.executeToolsInMessage(multiToolMessage)
+
+    // Send user message during tool execution
+    setTimeout(() => {
+      mockTask.hasPendingUserMessage = true
+      mockTask.pendingUserContent = [{ type: 'text', text: 'User message during tools' }]
+    }, 25)
+
+    const result = await executionPromise
+
+    // Should detect pending message and interrupt
+    expect(result).toContain('Tool Execution Interrupted')
   })
 })

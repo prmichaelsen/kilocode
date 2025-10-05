@@ -18,6 +18,7 @@ import type {
 	TokenUsage,
 	ToolUsage,
 	ToolName,
+	QueuedMessage,
 } from "@roo-code/types"
 
 import type { ApiHandler, ApiHandlerCreateMessageMetadata } from "../api/index.js"
@@ -28,6 +29,7 @@ import { generateWebSystemPrompt } from "../prompts/system.js"
 import type { McpHub } from "../services/mcp/McpHub.js"
 import type { DiffStrategy } from "../shared/tools.js"
 import { ContextCondenser, CondensedContext } from "../context/ContextCondenser.js"
+import { MessageQueueService } from "./MessageQueueService.js"
 
 export class Task extends EventEmitter<TaskEvents> {
 	readonly taskId: string
@@ -55,11 +57,15 @@ export class Task extends EventEmitter<TaskEvents> {
 	// State
 	abort: boolean = false
 	isInitialized = false
-	
-	// Interruption & Control
-	private interrupted: boolean = false
-	private interruptReason?: string
 	private currentStreamController?: AbortController
+	
+	// Message Queue Service
+	public readonly messageQueueService: MessageQueueService
+	private messageQueueStateChangedHandler: (() => void) | undefined
+	
+	// Pending user message handling (deprecated - use messageQueueService instead)
+	private hasPendingUserMessage: boolean = false
+	private pendingUserContent?: Anthropic.Messages.ContentBlockParam[]
 	
 	// Working directory management
 	private currentWorkingDirectory: string
@@ -107,6 +113,9 @@ export class Task extends EventEmitter<TaskEvents> {
 		// Initialize context condenser with API handler and custom config
 		this.contextCondenser = new ContextCondenser(this.api, options.contextCondensationConfig)
 
+		// Initialize message queue service
+		this.messageQueueService = new MessageQueueService()
+		
 		// Load existing conversation history and working directory if available
 		this.initializeConversationHistory().then(() => {
 			if (options.task || options.images) {
@@ -258,50 +267,25 @@ export class Task extends EventEmitter<TaskEvents> {
 			return // Return gracefully instead of throwing
 		}
 
-		console.log(`[Task] Continuing conversation for task ${this.taskId}`)
+		console.log(`[Task] Queueing message for task ${this.taskId}`)
 
-		// ENHANCED FIX: Better handling of interrupted state
-		// Wait for any current streaming to complete before continuing
-		if (this.isStreaming) {
-			console.log(`[Task] Waiting for current streaming to complete before continuing conversation`)
-			// Abort current stream controller if active
-			if (this.currentStreamController) {
-				this.currentStreamController.abort()
-			}
-			// Wait a bit for stream to finish
-			await new Promise(resolve => setTimeout(resolve, 200))
+		// Queue the message instead of processing it directly
+		// This allows the message to interrupt autonomous execution loops
+		const queuedMessage = this.messageQueueService.addMessage(text, images)
+		
+		if (!queuedMessage) {
+			console.warn(`[Task] Failed to queue message - empty text and no images`)
+			return
 		}
 
-		// Reset interrupted state when user sends new message
-		if (this.interrupted) {
-			console.log(`[Task] Auto-resuming interrupted task ${this.taskId} due to new user message`)
-			this.interrupted = false
-			this.interruptReason = undefined
-			this.abort = false // Ensure abort flag is also reset
+		console.log(`[Task] Message queued with ID ${queuedMessage.id}`)
+
+		// If the task is currently streaming, abort the stream to allow the queued message to be processed
+		if (this.isStreaming && this.currentStreamController) {
+			console.log(`[Task] Aborting current stream to process queued message`)
+			this.currentStreamController.abort()
 		}
 
-		// Add user message to conversation
-		await this.say("user_feedback", text, images)
-
-		// Create user content for API
-		let userContent: Anthropic.Messages.ContentBlockParam[] = [
-			{ type: "text", text }
-		]
-
-		if (images && images.length > 0) {
-			const imageBlocks: Anthropic.ImageBlockParam[] = images.map((image) => ({
-				type: "image" as const,
-				source: {
-					type: "base64" as const,
-					media_type: "image/jpeg" as const,
-					data: image.split(",")[1] || image,
-				},
-			}))
-			userContent.push(...imageBlocks)
-		}
-
-		// Continue the task loop with the new user content
-		await this.initiateTaskLoop(userContent)
 	}
 
 	public approveAsk({ text, images }: { text?: string; images?: string[] } = {}) {
@@ -353,12 +337,38 @@ export class Task extends EventEmitter<TaskEvents> {
 	private async initiateTaskLoop(userContent: Anthropic.Messages.ContentBlockParam[]): Promise<void> {
 		let nextUserContent = userContent
 
-		while (!this.abort && !this.interrupted) {
-			// CRITICAL FIX: Check for interruption at the start of each loop iteration
-			// This prevents the agent from getting stuck in thinking loops
-			if (this.interrupted) {
-				console.log(`[Task] Task loop interrupted for task ${this.taskId}`)
-				break
+		while (!this.abort) {
+			// CRITICAL: Check for queued messages at the start of each loop iteration
+			// This allows user messages to interrupt autonomous execution
+			if (!this.messageQueueService.isEmpty()) {
+				console.log(`[Task] Processing queued message for task ${this.taskId}`)
+				const queuedMessage = this.messageQueueService.dequeueMessage()
+				
+				if (queuedMessage) {
+					// Add user message to conversation
+					await this.say("user_feedback", queuedMessage.text, queuedMessage.images)
+					
+					// Create user content for API
+					let userContent: Anthropic.Messages.ContentBlockParam[] = [
+						{ type: "text", text: queuedMessage.text }
+					]
+
+					if (queuedMessage.images && queuedMessage.images.length > 0) {
+						const imageBlocks: Anthropic.ImageBlockParam[] = queuedMessage.images.map((image: string) => ({
+							type: "image" as const,
+							source: {
+								type: "base64" as const,
+								media_type: "image/jpeg" as const,
+								data: image.split(",")[1] || image,
+							},
+						}))
+						userContent.push(...imageBlocks)
+					}
+					
+					// Process the queued message with priority
+					nextUserContent = userContent
+					continue
+				}
 			}
 
 			const result = await this.recursivelyMakeClineRequests(nextUserContent)
@@ -366,10 +376,15 @@ export class Task extends EventEmitter<TaskEvents> {
 			if (result.didEndLoop) {
 				break
 			} else {
-				// CRITICAL FIX: Check for interruption before continuing the loop
-				// This gives user messages a chance to interrupt between iterations
-				if (this.interrupted || this.abort) {
-					console.log(`[Task] Task loop stopping due to interruption: interrupted=${this.interrupted}, abort=${this.abort}`)
+				// Check for abort or queued messages before continuing the loop
+				if (this.abort || !this.messageQueueService.isEmpty()) {
+					console.log(`[Task] Task loop checking: abort=${this.abort}, queuedMessages=${this.messageQueueService.messages.length}`)
+					
+					// If there are queued messages, continue the loop to process them
+					if (!this.messageQueueService.isEmpty()) {
+						continue
+					}
+					
 					break
 				}
 
@@ -395,12 +410,10 @@ export class Task extends EventEmitter<TaskEvents> {
 			return { didEndLoop: true } // End gracefully instead of throwing
 		}
 
-		// CRITICAL FIX: Reset interrupted state when starting new request
-		// This prevents the task from getting stuck in interrupted state
-		if (this.interrupted) {
-			console.log(`[Task] Resetting interrupted state for new request in task ${this.taskId}`)
-			this.interrupted = false
-			this.interruptReason = undefined
+		// Check for queued messages before starting new request
+		if (!this.messageQueueService.isEmpty()) {
+			console.log(`[Task] Skipping request due to queued message in task ${this.taskId}`)
+			return { didEndLoop: false } // Don't end loop, just skip this iteration to process queue
 		}
 
 		const finalUserContent = [...userContent]
@@ -430,9 +443,9 @@ export class Task extends EventEmitter<TaskEvents> {
 
 			try {
 				for await (const chunk of stream) {
-					// Check for abort or interruption
-					if (this.abort || this.interrupted) {
-						console.log(`[Task] Stream interrupted: abort=${this.abort}, interrupted=${this.interrupted}`)
+					// Check for abort or queued messages
+					if (this.abort || !this.messageQueueService.isEmpty()) {
+						console.log(`[Task] Stream aborted: abort=${this.abort}, queuedMessages=${this.messageQueueService.messages.length}`)
 						break
 					}
 
@@ -671,7 +684,7 @@ export class Task extends EventEmitter<TaskEvents> {
 				taskId: this.taskId,
 				modelId: this.api.getModel().id,
 				errorCount,
-				interruptionCount: this.interrupted ? 1 : 0,
+				interruptionCount: 0,
 				lastToolUsed,
 				contextUtilization,
 				condensationCount: this.condensationCount,
@@ -782,76 +795,23 @@ export class Task extends EventEmitter<TaskEvents> {
 
 	public async abortTask() {
 		this.abort = true
+		
+		// Dispose message queue service
+		if (this.messageQueueStateChangedHandler) {
+			this.messageQueueService.removeListener("stateChanged", this.messageQueueStateChangedHandler)
+			this.messageQueueStateChangedHandler = undefined
+		}
+		
+		this.messageQueueService.dispose()
+		
 		this.emit("error", "Task aborted")
 	}
-
-	// Enhanced interruption methods for Task Interruption & Control
-	public async interruptTask(reason: string = "User interrupted"): Promise<void> {
-		console.log(`[Task] Interrupting task ${this.taskId}: ${reason}`)
-		
-		this.interrupted = true
-		this.interruptReason = reason
-		
-		// Abort current streaming if active
-		if (this.currentStreamController) {
-			this.currentStreamController.abort()
-		}
-		
-		// Emit interruption event
-		this.emit("interrupted", reason)
-		
-		// SIMPLE FIX: Don't add interruption message to conversation
-		// The server will handle notifying the client about interruption
-		// This prevents duplicate interruption messages in the chat
-	}
-
-	public async haltTask(reason: string = "Task halted by user"): Promise<void> {
-		console.log(`[Task] Halting task ${this.taskId}: ${reason}`)
-		
-		// More aggressive halt - sets abort flag and interrupts
-		this.abort = true
-		this.interrupted = true
-		this.interruptReason = reason
-		
-		// Abort current streaming
-		if (this.currentStreamController) {
-			this.currentStreamController.abort()
-		}
-		
-		// Emit halt event
-		this.emit("halted", reason)
-		
-		// SIMPLE FIX: Don't add halt message to conversation
-		// The server will handle notifying the client about halt
-		// This prevents duplicate halt messages in the chat
-	}
-
-	public isInterrupted(): boolean {
-		return this.interrupted
-	}
-
-	public getInterruptReason(): string | undefined {
-		return this.interruptReason
-	}
-
-	public async resumeTask(): Promise<void> {
-		if (!this.interrupted) {
-			console.warn(`[Task] Attempted to resume non-interrupted task ${this.taskId}`)
-			return
-		}
-		
-		console.log(`[Task] Resuming task ${this.taskId}`)
-		
-		this.interrupted = false
-		this.interruptReason = undefined
-		this.abort = false
-		
-		// Emit resume event
-		this.emit("resumed")
-		
-		// SIMPLE FIX: Don't add resume message to conversation
-		// The server will handle notifying the client about resume
-		// This prevents duplicate resume messages in the chat
+	
+	/**
+	 * Get all queued messages
+	 */
+	public get queuedMessages(): QueuedMessage[] {
+		return this.messageQueueService.messages
 	}
 
 	/**
@@ -998,7 +958,6 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	// Execute tools found in assistant message and return results
-	// CRITICAL FIX: Add interruption checks between tool executions to prevent "thinking loops"
 	private async executeToolsInMessage(message: string): Promise<string | null> {
 		try {
 			console.log(`[Task] Executing tools in message for task ${this.taskId}`)
@@ -1010,10 +969,10 @@ export class Task extends EventEmitter<TaskEvents> {
 				return null
 			}
 
-			// CRITICAL: Check for interruption before executing any tools
-			if (this.abort || this.interrupted) {
-				console.log(`[Task] Tool execution interrupted: abort=${this.abort}, interrupted=${this.interrupted}`)
-				return `[Tool Execution Interrupted]\n\nTask was interrupted before tool execution could complete.`
+			// Check for abort before executing any tools
+			if (this.abort) {
+				console.log(`[Task] Tool execution aborted: abort=${this.abort}`)
+				return `[Tool Execution Aborted]\n\nTask was aborted before tool execution could complete.`
 			}
 
 			// Parse all tools from the message first to execute them sequentially with interruption checks
@@ -1035,10 +994,10 @@ export class Task extends EventEmitter<TaskEvents> {
 
 			// Execute list_files tool
 			if (message.includes('<list_files>')) {
-				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during list_files`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				// Check for abort before each tool
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during list_files`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				try {
@@ -1051,10 +1010,10 @@ export class Task extends EventEmitter<TaskEvents> {
 
 			// Execute read_file tool
 			if (message.includes('<read_file>')) {
-				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during read_file`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				// Check for abort before each tool
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during read_file`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
@@ -1075,9 +1034,9 @@ export class Task extends EventEmitter<TaskEvents> {
 			// Execute execute_command tool
 			if (message.includes('<execute_command>')) {
 				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during execute_command`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during execute_command`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				const commandMatch = message.match(/<command>(.*?)<\/command>/s)
@@ -1095,9 +1054,9 @@ export class Task extends EventEmitter<TaskEvents> {
 			// Execute write_to_file tool
 			if (message.includes('<write_to_file>')) {
 				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during write_to_file`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during write_to_file`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
@@ -1118,9 +1077,9 @@ export class Task extends EventEmitter<TaskEvents> {
 			// Execute search_and_replace tool
 			if (message.includes('<search_and_replace>')) {
 				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during search_and_replace`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during search_and_replace`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
@@ -1259,9 +1218,9 @@ export class Task extends EventEmitter<TaskEvents> {
 			// Execute change_working_directory tool
 			if (message.includes('<change_working_directory>')) {
 				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during change_working_directory`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during change_working_directory`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
@@ -1279,9 +1238,9 @@ export class Task extends EventEmitter<TaskEvents> {
 			// Execute condense_context tool
 			if (message.includes('<condense_context>')) {
 				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during condense_context`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during condense_context`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				try {
@@ -1335,9 +1294,9 @@ export class Task extends EventEmitter<TaskEvents> {
 				console.log(`[Task] Executing use_mcp_tool`)
 				
 				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during use_mcp_tool`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during use_mcp_tool`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				const serverNameMatch = message.match(/<server_name>(.*?)<\/server_name>/s)
@@ -1384,9 +1343,9 @@ export class Task extends EventEmitter<TaskEvents> {
 				console.log(`[Task] Executing access_mcp_resource`)
 				
 				// Check for interruption before each tool
-				if (this.abort || this.interrupted) {
-					console.log(`[Task] Tool execution interrupted during access_mcp_resource`)
-					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				if (this.abort) {
+					console.log(`[Task] Tool execution aborted during access_mcp_resource`)
+					return this.buildToolResults(toolResults, "[Tool Execution Aborted] Task was aborted during tool execution.")
 				}
 
 				const serverNameMatch = message.match(/<server_name>(.*?)<\/server_name>/s)
@@ -1423,11 +1382,11 @@ export class Task extends EventEmitter<TaskEvents> {
 		}
 	}
 
-	// Helper method to build tool results with interruption message
-	private buildToolResults(existingResults: string[], interruptionMessage: string): string {
+	// Helper method to build tool results with abort message
+	private buildToolResults(existingResults: string[], abortMessage: string): string {
 		const results = [...existingResults]
-		if (interruptionMessage) {
-			results.push(interruptionMessage)
+		if (abortMessage) {
+			results.push(abortMessage)
 		}
 		return results.join('\n\n')
 	}

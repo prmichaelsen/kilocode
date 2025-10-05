@@ -33,7 +33,7 @@ export class ContextCondenser {
 	constructor(apiHandler: ApiHandler, options: Partial<ContextCondensationOptions> = {}) {
 		this.apiHandler = apiHandler
 		this.options = {
-			maxContextTokens: 100000, // ~100k tokens context window
+			maxContextTokens: 3 * 100000, // ~100k tokens context window
 			summaryTokenRatio: 0.3, // Summaries should be 30% of original size
 			minMessagesBeforeCondensation: 20,
 			preserveRecentMessages: 10,
