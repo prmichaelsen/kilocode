@@ -56,6 +56,13 @@ Key directories:
 - /home/prmichaelsen/notebin - Directory for storing Patrick Michaelsen's notes
 - /home/prmichaelsen/notebin/README.md - Instructions on how to use the notebin
 
+You can see /home/prmichaelsen/kilocode/ecosystem.config.js for how to manage your processes.
+
+You can see there is a production and a dev version of each process. They use different ports.
+
+If you want to use the ecosystem file to start a process, use its full path.
+
+
 `;
 	
 	const toolUseSection = `====

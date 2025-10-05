@@ -419,6 +419,13 @@ export class Task extends EventEmitter<TaskEvents> {
 			})
 
 			let assistantMessage = ""
+			let usageData: {
+				inputTokens: number
+				outputTokens: number
+				cacheWriteTokens?: number
+				cacheReadTokens?: number
+				totalCost?: number
+			} | null = null
 			this.isStreaming = true
 
 			try {
@@ -435,6 +442,14 @@ export class Task extends EventEmitter<TaskEvents> {
 							await this.say("text", assistantMessage, undefined, true)
 							break
 						case "usage":
+							// Capture usage data to create api_req_started message
+							usageData = {
+								inputTokens: chunk.inputTokens,
+								outputTokens: chunk.outputTokens,
+								cacheWriteTokens: chunk.cacheWriteTokens,
+								cacheReadTokens: chunk.cacheReadTokens,
+								totalCost: chunk.totalCost,
+							}
 							console.log(
 								`[Task] Usage: ${chunk.inputTokens} in, ${chunk.outputTokens} out, cost: $${chunk.totalCost || 0}`,
 							)
@@ -448,6 +463,21 @@ export class Task extends EventEmitter<TaskEvents> {
 			} finally {
 				this.isStreaming = false
 				this.currentStreamController = undefined
+			}
+
+			// Create api_req_started message with actual token usage data
+			if (usageData) {
+				await this.say(
+					"api_req_started",
+					JSON.stringify({
+						tokensIn: usageData.inputTokens,
+						tokensOut: usageData.outputTokens,
+						cacheWrites: usageData.cacheWriteTokens || 0,
+						cacheReads: usageData.cacheReadTokens || 0,
+						cost: usageData.totalCost || 0,
+						apiProtocol: this.api.getModel().id.includes("claude") ? "anthropic" : "openai",
+					}),
+				)
 			}
 
 			// Complete the partial message
@@ -665,14 +695,80 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	public getTokenUsage(): TokenUsage {
-		// Simple token usage calculation
-		const totalMessages = this.clineMessages.length
-		return {
-			totalTokensIn: totalMessages * 100, // Rough estimate
-			totalTokensOut: totalMessages * 50,
-			totalCost: totalMessages * 0.01,
-			contextTokens: totalMessages * 150,
+		// Use the same logic as the main extension to track actual token usage
+		// from api_req_started messages
+		const result: TokenUsage = {
+			totalTokensIn: 0,
+			totalTokensOut: 0,
+			totalCacheWrites: undefined,
+			totalCacheReads: undefined,
+			totalCost: 0,
+			contextTokens: 0,
 		}
+
+		// Calculate running totals from api_req_started messages
+		this.clineMessages.forEach((message) => {
+			if (message.type === "say" && message.say === "api_req_started" && message.text) {
+				try {
+					const parsedText = JSON.parse(message.text)
+					const { tokensIn, tokensOut, cacheWrites, cacheReads, cost } = parsedText
+
+					if (typeof tokensIn === "number") {
+						result.totalTokensIn += tokensIn
+					}
+
+					if (typeof tokensOut === "number") {
+						result.totalTokensOut += tokensOut
+					}
+
+					if (typeof cacheWrites === "number") {
+						result.totalCacheWrites = (result.totalCacheWrites ?? 0) + cacheWrites
+					}
+
+					if (typeof cacheReads === "number") {
+						result.totalCacheReads = (result.totalCacheReads ?? 0) + cacheReads
+					}
+
+					if (typeof cost === "number") {
+						result.totalCost += cost
+					}
+				} catch (error) {
+					console.error("[Task] Error parsing api_req_started JSON:", error)
+				}
+			} else if (message.type === "say" && message.say === "condense_context") {
+				// Add condensation costs
+				result.totalCost += (message as any).contextCondense?.cost ?? 0
+			}
+		})
+
+		// Calculate context tokens from the last API request
+		for (let i = this.clineMessages.length - 1; i >= 0; i--) {
+			const message = this.clineMessages[i]
+
+			if (message && message.type === "say" && message.say === "api_req_started" && message.text) {
+				try {
+					const parsedText = JSON.parse(message.text)
+					const { tokensIn, tokensOut, cacheWrites, cacheReads, apiProtocol } = parsedText
+
+					// Calculate context tokens based on API protocol
+					if (apiProtocol === "anthropic") {
+						result.contextTokens = (tokensIn || 0) + (tokensOut || 0) + (cacheWrites || 0) + (cacheReads || 0)
+					} else {
+						// For OpenAI (or when protocol is not specified)
+						result.contextTokens = (tokensIn || 0) + (tokensOut || 0)
+					}
+					break
+				} catch (error) {
+					console.error("[Task] Error parsing api_req_started JSON for context tokens:", error)
+					continue
+				}
+			} else if (message && message.type === "say" && message.say === "condense_context") {
+				result.contextTokens = (message as any).contextCondense?.newContextTokens ?? 0
+				break
+			}
+		}
+
+		return result
 	}
 
 	public async abortTask() {

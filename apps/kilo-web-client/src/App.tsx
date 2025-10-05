@@ -38,7 +38,7 @@ interface TaskState {
 	secondaryButtonText?: string
 }
 
-// Dynamic WebSocket URL based on current host
+// Dynamic WebSocket URL based on current host and port
 const getWebSocketUrl = () => {
 	if (process.env.REACT_APP_WS_URL) {
 		return process.env.REACT_APP_WS_URL
@@ -47,9 +47,20 @@ const getWebSocketUrl = () => {
 	// Use current host for WebSocket connection
 	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 	const host = window.location.hostname
-	const port = window.location.hostname === 'localhost' ? '3001' : '3001'
 	
-	return `${protocol}//${host}:${port}/ws`
+	// Determine WebSocket port based on client port
+	// If client is on 3000 (dev), connect to 3001
+	// If client is on 4000 (prod), connect to 4001
+	const clientPort = window.location.port
+	let wsPort = '3001' // default dev
+	
+	if (clientPort === '4000') {
+		wsPort = '4001' // production
+	} else if (clientPort === '3000' || clientPort === '') {
+		wsPort = '3001' // development
+	}
+	
+	return `${protocol}//${host}:${wsPort}/ws`
 }
 
 const WS_URL = getWebSocketUrl()

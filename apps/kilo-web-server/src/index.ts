@@ -6,7 +6,8 @@ dotenv.config()
 
 // Start the server
 const server = new SimpleWebServer()
-server.start()
+const port = parseInt(process.env.PORT || "3001", 10)
+server.start(port)
 
 // Graceful shutdown
 process.on("SIGTERM", async () => {
