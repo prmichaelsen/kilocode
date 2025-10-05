@@ -6,6 +6,10 @@ import { serializeError } from "serialize-error"
 import delay from "delay"
 import pWaitFor from "p-wait-for"
 
+function escapeRegExp(input: string): string {
+    return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 import type {
 	ClineMessage,
 	ClineAsk,
@@ -23,6 +27,7 @@ import type { ClineAskResponse } from "../index.js"
 import { generateWebSystemPrompt } from "../prompts/system.js"
 import type { McpHub } from "../services/mcp/McpHub.js"
 import type { DiffStrategy } from "../shared/tools.js"
+import { ContextCondenser, CondensedContext } from "../context/ContextCondenser.js"
 
 export class Task extends EventEmitter<TaskEvents> {
 	readonly taskId: string
@@ -41,6 +46,11 @@ export class Task extends EventEmitter<TaskEvents> {
 	private mcpHub?: McpHub
 	private diffStrategy?: DiffStrategy
 	private enableMcpServerCreation?: boolean
+
+	// Context Management
+	private contextCondenser?: ContextCondenser
+	private condensationCount: number = 0
+	private lastCondensationRatio?: number
 
 	// State
 	abort: boolean = false
@@ -93,6 +103,9 @@ export class Task extends EventEmitter<TaskEvents> {
 
 		this.apiConfiguration = options.apiConfiguration
 		this.api = buildApiHandler(options.apiConfiguration)
+
+		// Initialize context condenser with API handler and custom config
+		this.contextCondenser = new ContextCondenser(this.api, options.contextCondensationConfig)
 
 		// Load existing conversation history and working directory if available
 		this.initializeConversationHistory().then(() => {
@@ -500,6 +513,30 @@ export class Task extends EventEmitter<TaskEvents> {
 		const messageWithTs = { ...message, ts: Date.now() }
 		this.apiConversationHistory.push(messageWithTs)
 		
+		// Check if context condensation is needed
+		if (this.contextCondenser) {
+			const currentTokens = this.contextCondenser.estimateTokenCount(this.apiConversationHistory)
+			
+			if (this.contextCondenser.shouldCondenseContext(this.apiConversationHistory, currentTokens)) {
+				console.log(`[Task] Context condensation triggered - ${this.apiConversationHistory.length} messages, ~${currentTokens} tokens`)
+				
+				try {
+					const result = await this.contextCondenser.condenseContext(this.apiConversationHistory)
+					
+					if (result.condensed && result.condensedHistory) {
+						console.log(`[Task] Context condensed: ${result.originalTokens} -> ${result.condensedTokens} tokens (${Math.round(result.compressionRatio * 100)}% compression)`)
+						this.apiConversationHistory = result.condensedHistory
+						
+						// Save condensed history immediately
+						await this.saveApiConversationHistory()
+					}
+				} catch (error) {
+					console.error(`[Task] Context condensation failed:`, error)
+					// Continue without condensation if it fails
+				}
+			}
+		}
+		
 		// PERFORMANCE OPTIMIZATION: Debounce API conversation history saves
 		// Only save when we have significant changes to avoid excessive Firebase writes
 		if (this.apiConversationHistory.length % 5 === 0) {
@@ -597,7 +634,9 @@ export class Task extends EventEmitter<TaskEvents> {
 				errorCount,
 				interruptionCount: this.interrupted ? 1 : 0,
 				lastToolUsed,
-				contextUtilization
+				contextUtilization,
+				condensationCount: this.condensationCount,
+				lastCondensationRatio: this.lastCondensationRatio
 			}
 		)
 		
@@ -710,6 +749,69 @@ export class Task extends EventEmitter<TaskEvents> {
 		// This prevents duplicate resume messages in the chat
 	}
 
+	/**
+	 * Manually trigger context condensation
+	 */
+	public async manuallyCondenseContext(preserveRecent: number = 10, force: boolean = false): Promise<{
+		success: boolean
+		message: string
+		compressionRatio?: number
+	}> {
+		if (!this.contextCondenser) {
+			return {
+				success: false,
+				message: "Context condenser not available"
+			}
+		}
+
+		try {
+			const validPreserveRecent = Math.max(5, Math.min(20, preserveRecent))
+			
+			// Temporarily update options
+			const originalOptions = this.contextCondenser.getOptions()
+			this.contextCondenser.updateOptions({
+				preserveRecentMessages: validPreserveRecent,
+				enableAutoCondensation: force ? true : originalOptions.enableAutoCondensation
+			})
+			
+			const currentTokens = this.contextCondenser.estimateTokenCount(this.apiConversationHistory)
+			const shouldCondense = force || this.contextCondenser.shouldCondenseContext(this.apiConversationHistory, currentTokens)
+			
+			if (!shouldCondense) {
+				this.contextCondenser.updateOptions(originalOptions)
+				return {
+					success: false,
+					message: `Context condensation not needed (${this.apiConversationHistory.length} messages, ~${currentTokens} tokens)`
+				}
+			}
+			
+			const result = await this.contextCondenser.condenseContext(this.apiConversationHistory)
+			
+			if (result.condensed && result.condensedHistory) {
+				this.apiConversationHistory = result.condensedHistory
+				await this.saveApiConversationHistory()
+				
+				this.contextCondenser.updateOptions(originalOptions)
+				return {
+					success: true,
+					message: `Context condensed: ${result.originalTokens} -> ${result.condensedTokens} tokens`,
+					compressionRatio: result.compressionRatio
+				}
+			}
+			
+			this.contextCondenser.updateOptions(originalOptions)
+			return {
+				success: false,
+				message: "Condensation would not provide meaningful compression"
+			}
+		} catch (error) {
+			return {
+				success: false,
+				message: `Condensation failed: ${error instanceof Error ? error.message : String(error)}`
+			}
+		}
+	}
+
 	private checkForToolUse(message: string): boolean {
 		// Simple check for tool usage patterns
 		const toolPatterns = [
@@ -721,6 +823,7 @@ export class Task extends EventEmitter<TaskEvents> {
 			/<search_files>/,
 			/<search_and_replace>/,
 			/<change_working_directory>/,
+			/<condense_context>/,
 			/<use_mcp_tool>/,
 			/<access_mcp_resource>/,
 			/<attempt_completion>/,
@@ -918,32 +1021,132 @@ export class Task extends EventEmitter<TaskEvents> {
 				const pathMatch = message.match(/<path>(.*?)<\/path>/s)
 				const searchMatch = message.match(/<search>(.*?)<\/search>/s)
 				const replaceMatch = message.match(/<replace>(.*?)<\/replace>/s)
+				const useRegexMatch = message.match(/<use_regex>(.*?)<\/use_regex>/s)
+				const ignoreCaseMatch = message.match(/<ignore_case>(.*?)<\/ignore_case>/s)
+				const startLineMatch = message.match(/<start_line>(.*?)<\/start_line>/s)
+				const endLineMatch = message.match(/<end_line>(.*?)<\/end_line>/s)
 				
-				if (pathMatch && pathMatch[1] && searchMatch && searchMatch[1] && replaceMatch && replaceMatch[1]) {
+				if (pathMatch && pathMatch[1] && searchMatch && searchMatch[1] && replaceMatch) {
+					const filePath = pathMatch[1].trim()
+					const resolvedPath = this.resolvePath(filePath)
+					const searchText = searchMatch[1].trim()
+					const replaceText = replaceMatch[1] ? replaceMatch[1].trim() : ''
+					const useRegex = useRegexMatch && useRegexMatch[1] && useRegexMatch[1].trim().toLowerCase() === 'true'
+					const ignoreCase = ignoreCaseMatch && ignoreCaseMatch[1] && ignoreCaseMatch[1].trim().toLowerCase() === 'true'
+					const startLine = startLineMatch && startLineMatch[1] ? parseInt(startLineMatch[1].trim(), 10) : undefined
+					const endLine = endLineMatch && endLineMatch[1] ? parseInt(endLineMatch[1].trim(), 10) : undefined
+					
 					try {
-						const filePath = pathMatch[1].trim()
-						const resolvedPath = this.resolvePath(filePath)
-						const searchText = searchMatch[1].trim()
-						const replaceText = replaceMatch[1].trim()
-						
-						// Read the file
-						const content = await this.fileSystem.readFile(resolvedPath)
-						
-						// Perform the replacement
-						const updatedContent = content.replace(new RegExp(searchText, 'g'), replaceText)
-						
-						// Check if any changes were made
-						if (content === updatedContent) {
-							toolResults.push(`[search_and_replace Result]\n\nNo matches found for "${searchText}" in file: ${filePath}`)
+						// Validate file exists
+						const fileExists = await this.fileSystem.exists(resolvedPath)
+						if (!fileExists) {
+							toolResults.push(`[search_and_replace Result]\n\nError: File does not exist at path: ${filePath}\nThe specified file could not be found. Please verify the file path and try again.`)
 						} else {
-							// Write the updated content back
-							await this.fileSystem.writeFile(resolvedPath, updatedContent)
+							// Read the file
+							let content: string
+							try {
+								content = await this.fileSystem.readFile(resolvedPath)
+							} catch (readError) {
+								toolResults.push(`[search_and_replace Result]\n\nError reading file: ${filePath}\nFailed to read the file content: ${readError instanceof Error ? readError.message : String(readError)}\nPlease verify file permissions and try again.`)
+								throw readError
+							}
 							
-							const matchCount = (content.match(new RegExp(searchText, 'g')) || []).length
-							toolResults.push(`[search_and_replace Result]\n\nSuccessfully replaced ${matchCount} occurrence(s) of "${searchText}" with "${replaceText}" in file: ${filePath}`)
+							// Create search pattern with proper escaping and flags
+							const flags = ignoreCase ? 'gi' : 'g'
+							let searchPattern: RegExp
+							
+							try {
+								if (useRegex) {
+									// Use regex directly, but validate it first
+									searchPattern = new RegExp(searchText, flags)
+								} else {
+									// Escape special regex characters for literal search
+									searchPattern = new RegExp(escapeRegExp(searchText), flags)
+								}
+							} catch (regexError) {
+								toolResults.push(`[search_and_replace Result]\n\nError: Invalid regex pattern: ${searchText}\n${regexError instanceof Error ? regexError.message : String(regexError)}`)
+								throw regexError
+							}
+							
+							// Perform replacement based on line range
+							let newContent: string
+							if (startLine !== undefined || endLine !== undefined) {
+								// Handle line-specific replacement
+								const lines = content.split('\n')
+								const start = Math.max((startLine ?? 1) - 1, 0)
+								const end = Math.min((endLine ?? lines.length) - 1, lines.length - 1)
+								
+								// Validate line range
+								if (start > lines.length - 1) {
+									toolResults.push(`[search_and_replace Result]\n\nError: start_line (${startLine}) exceeds file length (${lines.length} lines)`)
+								} else {
+									// Get content before and after target section
+									const beforeLines = lines.slice(0, start)
+									const afterLines = lines.slice(end + 1)
+									
+									// Get and modify target section
+									const targetContent = lines.slice(start, end + 1).join('\n')
+									const modifiedContent = targetContent.replace(searchPattern, replaceText)
+									const modifiedLines = modifiedContent.split('\n')
+									
+									// Reconstruct full content
+									newContent = [...beforeLines, ...modifiedLines, ...afterLines].join('\n')
+									
+									// Check if any changes were made and write
+									if (content === newContent) {
+										const rangeInfo = ` in lines ${startLine ?? 1}-${endLine ?? 'end'}`
+										toolResults.push(`[search_and_replace Result]\n\nNo matches found for "${searchText}"${rangeInfo} in file: ${filePath}`)
+									} else {
+										// Write the updated content back
+										await this.fileSystem.writeFile(resolvedPath, newContent)
+										
+										// Count matches in the affected section
+										const affectedContent = lines.slice(start, end + 1).join('\n')
+										const matchCount = (affectedContent.match(searchPattern) || []).length
+										
+										const rangeInfo = ` in lines ${startLine ?? 1}-${endLine ?? 'end'}`
+										const regexInfo = useRegex ? ' (regex)' : ''
+										const caseInfo = ignoreCase ? ' (case-insensitive)' : ''
+										
+										toolResults.push(`[search_and_replace Result]\n\nSuccessfully replaced ${matchCount} occurrence(s) of "${searchText}" with "${replaceText}"${rangeInfo}${regexInfo}${caseInfo} in file: ${filePath}`)
+									}
+								}
+							} else {
+								// Global replacement
+								newContent = content.replace(searchPattern, replaceText)
+								
+								// Check if any changes were made
+								if (content === newContent) {
+									toolResults.push(`[search_and_replace Result]\n\nNo matches found for "${searchText}" in file: ${filePath}`)
+								} else {
+									// Write the updated content back
+									await this.fileSystem.writeFile(resolvedPath, newContent)
+									
+									// Count matches
+									const matchCount = (content.match(searchPattern) || []).length
+									
+									const regexInfo = useRegex ? ' (regex)' : ''
+									const caseInfo = ignoreCase ? ' (case-insensitive)' : ''
+									
+									toolResults.push(`[search_and_replace Result]\n\nSuccessfully replaced ${matchCount} occurrence(s) of "${searchText}" with "${replaceText}"${regexInfo}${caseInfo} in file: ${filePath}`)
+								}
+							}
 						}
 					} catch (error) {
-						toolResults.push(`[search_and_replace Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
+						// Only add error if not already added
+						if (!toolResults.some(r => r.includes('[search_and_replace Result]') && r.includes('Error'))) {
+							toolResults.push(`[search_and_replace Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
+						}
+					}
+				} else {
+					// Missing required parameters
+					const missing: string[] = []
+					if (!pathMatch || !pathMatch[1]) missing.push('path')
+					if (!searchMatch || !searchMatch[1]) missing.push('search')
+					if (!replaceMatch) missing.push('replace')
+					
+					if (missing.length > 0) {
+						toolResults.push(`[search_and_replace Result]\n\nError: Missing required parameter(s): ${missing.join(', ')}`)
 					}
 				}
 			}
@@ -965,6 +1168,60 @@ export class Task extends EventEmitter<TaskEvents> {
 					} catch (error) {
 						toolResults.push(`[change_working_directory Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
 					}
+				}
+			}
+
+			// Execute condense_context tool
+			if (message.includes('<condense_context>')) {
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during condense_context`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
+				try {
+					const preserveRecentMatch = message.match(/<preserve_recent>(.*?)<\/preserve_recent>/s)
+					const forceMatch = message.match(/<force>(.*?)<\/force>/s)
+					
+					const preserveRecent = (preserveRecentMatch && preserveRecentMatch[1]) ? parseInt(preserveRecentMatch[1].trim()) : 10
+					const force = (forceMatch && forceMatch[1]) ? forceMatch[1].trim().toLowerCase() === 'true' : false
+					
+					// Validate preserve_recent parameter
+					const validPreserveRecent = Math.max(5, Math.min(20, preserveRecent))
+					
+					if (this.contextCondenser) {
+						// Temporarily update options if needed
+						const originalOptions = this.contextCondenser.getOptions()
+						this.contextCondenser.updateOptions({
+							preserveRecentMessages: validPreserveRecent,
+							enableAutoCondensation: force ? true : originalOptions.enableAutoCondensation
+						})
+						
+						const currentTokens = this.contextCondenser.estimateTokenCount(this.apiConversationHistory)
+						const shouldCondense = force || this.contextCondenser.shouldCondenseContext(this.apiConversationHistory, currentTokens)
+						
+						if (!shouldCondense) {
+							toolResults.push(`[condense_context Result]\n\nContext condensation not needed:\n- Current messages: ${this.apiConversationHistory.length}\n- Estimated tokens: ${currentTokens}\n- Threshold not met (use force=true to condense anyway)`)
+						} else {
+							const result = await this.contextCondenser.condenseContext(this.apiConversationHistory)
+							
+							if (result.condensed && result.condensedHistory) {
+								this.apiConversationHistory = result.condensedHistory
+								await this.saveApiConversationHistory()
+								
+								toolResults.push(`[condense_context Result]\n\nContext successfully condensed:\n- Original tokens: ${result.originalTokens}\n- Condensed tokens: ${result.condensedTokens}\n- Compression ratio: ${Math.round(result.compressionRatio * 100)}%\n- Messages preserved: ${validPreserveRecent}\n\nThe conversation context has been optimized while preserving essential information.`)
+							} else {
+								toolResults.push(`[condense_context Result]\n\nContext condensation skipped - compression would not be beneficial`)
+							}
+						}
+						
+						// Restore original options
+						this.contextCondenser.updateOptions(originalOptions)
+					} else {
+						toolResults.push(`[condense_context Result]\n\nError: Context condenser not available`)
+					}
+				} catch (error) {
+					toolResults.push(`[condense_context Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
 				}
 			}
 

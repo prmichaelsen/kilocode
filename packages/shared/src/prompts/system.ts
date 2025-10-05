@@ -7,6 +7,7 @@ import { getAttemptCompletionDescription } from './tools/attempt-completion.js'
 import { getSearchAndReplaceDescription } from './tools/search-and-replace.js'
 import { getChangeWorkingDirectoryDescription } from './tools/change-working-directory.js'
 import { getUseMcpToolDescription, getAccessMcpResourceDescription } from './tools/index'
+import { getCondenseContextDescription } from './tools/condense-context.js'
 import { getMcpServersSection } from './sections/mcp-servers.js'
 import { getDiagnosticsSection } from './sections/diagnostics.js'
 import { McpHub } from '../services/mcp/McpHub.js'
@@ -38,10 +39,24 @@ export async function generateWebSystemPrompt(
 		errorCount?: number,
 		interruptionCount?: number,
 		lastToolUsed?: string,
-		contextUtilization?: number
+		contextUtilization?: number,
+		condensationCount?: number,
+		lastCondensationRatio?: number
 	}
 ): Promise<string> {
-	const roleDefinition = "You are Kilo Code, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices."
+	const roleDefinition = `
+You are Kilo Code web, a general assistant. You know how to code but you do other stuff as well. 
+You have access to Patrick Michaelsen's remote computer, which you are also running on.
+
+Key directories:
+- /home/prmichaelsen/kilocode/apps/kilo-web-client - your web client code
+- /home/prmichaelsen/kilocode/apps/kilo-web-server - your web server code
+- /home/prmichaelsen/kilocode/packages/shared - common code 
+- /home/prmichaelsen/kilocode/src/ - reference code for the kilo code proper extension
+- /home/prmichaelsen/notebin - Directory for storing Patrick Michaelsen's notes
+- /home/prmichaelsen/notebin/README.md - Instructions on how to use the notebin
+
+`;
 	
 	const toolUseSection = `====
 
@@ -96,6 +111,8 @@ ${getWriteToFileDescription(toolArgs)}
 
 ${getListFilesDescription(toolArgs)}
 
+${getCondenseContextDescription(toolArgs)}
+
 ${mcpToolDescriptions ? `\n${mcpToolDescriptions}\n` : ''}
 
 ${getAttemptCompletionDescription(toolArgs)}`
@@ -119,7 +136,9 @@ ${getAttemptCompletionDescription(toolArgs)}`
 		diagnostics.errorCount,
 		diagnostics.interruptionCount,
 		diagnostics.lastToolUsed,
-		diagnostics.contextUtilization
+		diagnostics.contextUtilization,
+		diagnostics.condensationCount,
+		diagnostics.lastCondensationRatio
 	) : ''
 
 	const capabilities = `====

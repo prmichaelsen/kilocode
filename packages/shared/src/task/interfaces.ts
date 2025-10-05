@@ -37,6 +37,15 @@ export interface TerminalAdapter {
 	}>
 }
 
+export interface ContextCondensationConfig {
+	maxContextTokens?: number
+	summaryTokenRatio?: number
+	minMessagesBeforeCondensation?: number
+	preserveRecentMessages?: number
+	enableAutoCondensation?: boolean
+	condensationThreshold?: number
+}
+
 export interface TaskOptions {
 	taskId?: string
 	apiConfiguration: ProviderSettings
@@ -47,6 +56,7 @@ export interface TaskOptions {
 	mcpHub?: McpHub
 	diffStrategy?: DiffStrategy
 	enableMcpServerCreation?: boolean
+	contextCondensationConfig?: ContextCondensationConfig
 }
 
 export interface TaskEvents {

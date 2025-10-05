@@ -11,7 +11,9 @@ export function getDiagnosticsSection(
   errorCount?: number,
   interruptionCount?: number,
   lastToolUsed?: string,
-  contextUtilization?: number
+  contextUtilization?: number,
+  condensationCount?: number,
+  lastCondensationRatio?: number
 ): string {
   const diagnostics = `====
 
@@ -37,6 +39,12 @@ Current conversation metrics and system state for observability:
 - **Tool Executions**: ${toolExecutionCount || 0}
 - **Error Count**: ${errorCount || 0}
 - **Interruption Count**: ${interruptionCount || 0}
+
+## Context Management
+- **Auto-Condensation**: Enabled (triggers at 80% context utilization)
+- **Condensation Count**: ${condensationCount || 0}
+- **Last Compression Ratio**: ${lastCondensationRatio ? `${Math.round(lastCondensationRatio * 100)}%` : 'N/A'}
+- **Manual Condensation**: Available via condense_context tool
 
 This information helps you understand the current conversation context and system performance.`
 

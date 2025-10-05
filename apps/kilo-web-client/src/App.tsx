@@ -699,6 +699,7 @@ export default function App() {
 									<span>Status: {taskState.status}</span>
 									{taskState.isStreaming && <span className="text-blue-400">• Streaming...</span>}
 									<span className="text-green-400">• Context Maintained</span>
+									<span className="text-purple-400">• Auto-Condensation Enabled</span>
 								</div>
 							</div>
 							
