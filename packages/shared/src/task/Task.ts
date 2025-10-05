@@ -563,11 +563,42 @@ export class Task extends EventEmitter<TaskEvents> {
 	}
 
 	private async getSystemPrompt(): Promise<string> {
+		// Calculate diagnostics data
+		const tokenUsage = this.getTokenUsage()
+		const messageCount = this.clineMessages.length
+		const toolExecutionCount = Object.values(this.toolUsage).reduce((sum, usage) => sum + usage.attempts, 0)
+		const errorCount = Object.values(this.toolUsage).reduce((sum, usage) => sum + usage.failures, 0)
+		const sessionDuration = this.clineMessages.length > 0 ? Date.now() - (this.clineMessages[0]?.ts || Date.now()) : 0
+		const contextUtilization = Math.min(tokenUsage.contextTokens / 1000000, 1.0) // 1M context window
+		
+		// Get last tool used
+		const lastToolUsed = Object.keys(this.toolUsage).reduce((latest: string | undefined, toolName) => {
+			const usage = this.toolUsage[toolName as ToolName]
+			return (usage?.attempts || 0) > 0 ? toolName : latest
+		}, undefined as string | undefined)
+
 		const systemPrompt = await generateWebSystemPrompt(
 			this.workspacePath,
 			this.mcpHub,
 			this.diffStrategy,
-			this.enableMcpServerCreation
+			this.enableMcpServerCreation,
+			{
+				tokenUsage: {
+					input: tokenUsage.totalTokensIn,
+					output: tokenUsage.totalTokensOut,
+					total: tokenUsage.totalTokensIn + tokenUsage.totalTokensOut
+				},
+				messageCount,
+				toolExecutionCount,
+				sessionDuration,
+				currentCost: tokenUsage.totalCost,
+				taskId: this.taskId,
+				modelId: this.api.getModel().id,
+				errorCount,
+				interruptionCount: this.interrupted ? 1 : 0,
+				lastToolUsed,
+				contextUtilization
+			}
 		)
 		
 		// Debug: Log the entire system prompt for inspection
@@ -690,6 +721,8 @@ export class Task extends EventEmitter<TaskEvents> {
 			/<search_files>/,
 			/<search_and_replace>/,
 			/<change_working_directory>/,
+			/<use_mcp_tool>/,
+			/<access_mcp_resource>/,
 			/<attempt_completion>/,
 		]
 		return toolPatterns.some((pattern) => pattern.test(message))
@@ -760,6 +793,9 @@ export class Task extends EventEmitter<TaskEvents> {
 	// CRITICAL FIX: Add interruption checks between tool executions to prevent "thinking loops"
 	private async executeToolsInMessage(message: string): Promise<string | null> {
 		try {
+			console.log(`[Task] Executing tools in message for task ${this.taskId}`)
+			console.log(`[Task] Message content preview: ${message.substring(0, 200)}...`)
+			
 			// Check if we have a file system adapter for tool execution
 			if (!this.fileSystem) {
 				console.warn("[Task] No file system adapter available for tool execution")
@@ -774,6 +810,20 @@ export class Task extends EventEmitter<TaskEvents> {
 
 			// Parse all tools from the message first to execute them sequentially with interruption checks
 			const toolResults: string[] = []
+			
+			// Log detected tools
+			const detectedTools = []
+			if (message.includes('<list_files>')) detectedTools.push('list_files')
+			if (message.includes('<read_file>')) detectedTools.push('read_file')
+			if (message.includes('<execute_command>')) detectedTools.push('execute_command')
+			if (message.includes('<write_to_file>')) detectedTools.push('write_to_file')
+			if (message.includes('<search_and_replace>')) detectedTools.push('search_and_replace')
+			if (message.includes('<change_working_directory>')) detectedTools.push('change_working_directory')
+			if (message.includes('<use_mcp_tool>')) detectedTools.push('use_mcp_tool')
+			if (message.includes('<access_mcp_resource>')) detectedTools.push('access_mcp_resource')
+			
+			console.log(`[Task] Detected tools: ${detectedTools.join(', ')}`)
+			console.log(`[Task] MCP Hub available: ${!!this.mcpHub}`)
 
 			// Execute list_files tool
 			if (message.includes('<list_files>')) {
@@ -915,6 +965,91 @@ export class Task extends EventEmitter<TaskEvents> {
 					} catch (error) {
 						toolResults.push(`[change_working_directory Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
 					}
+				}
+			}
+
+			// Execute use_mcp_tool
+			if (message.includes('<use_mcp_tool>')) {
+				console.log(`[Task] Executing use_mcp_tool`)
+				
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during use_mcp_tool`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
+				const serverNameMatch = message.match(/<server_name>(.*?)<\/server_name>/s)
+				const toolNameMatch = message.match(/<tool_name>(.*?)<\/tool_name>/s)
+				const argumentsMatch = message.match(/<arguments>(.*?)<\/arguments>/s)
+				
+				console.log(`[Task] MCP tool parsing - server: ${serverNameMatch?.[1]}, tool: ${toolNameMatch?.[1]}, hasArgs: ${!!argumentsMatch?.[1]}`)
+				
+				if (serverNameMatch?.[1] && toolNameMatch?.[1] && this.mcpHub) {
+					try {
+						const serverName = serverNameMatch[1].trim()
+						const toolName = toolNameMatch[1].trim()
+						let toolArguments = {}
+						
+						if (argumentsMatch?.[1]) {
+							try {
+								toolArguments = JSON.parse(argumentsMatch[1].trim())
+								console.log(`[Task] Parsed MCP tool arguments:`, toolArguments)
+							} catch (parseError) {
+								console.error(`[Task] Error parsing MCP tool arguments:`, parseError)
+								toolResults.push(`[use_mcp_tool Result]\n\nError parsing arguments: ${parseError instanceof Error ? parseError.message : String(parseError)}`)
+								return toolResults.join('\n\n')
+							}
+						}
+						
+						console.log(`[Task] Calling MCP tool: ${serverName}.${toolName}`)
+						const result = await this.mcpHub.callTool(serverName, toolName, toolArguments)
+						console.log(`[Task] MCP tool result received:`, result)
+						toolResults.push(`[use_mcp_tool Result]\n\nServer: ${serverName}\nTool: ${toolName}\n\nResult:\n${JSON.stringify(result, null, 2)}`)
+					} catch (error) {
+						console.error(`[Task] Error executing MCP tool:`, error)
+						toolResults.push(`[use_mcp_tool Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
+					}
+				} else if (!this.mcpHub) {
+					console.warn(`[Task] MCP Hub not available for use_mcp_tool`)
+					toolResults.push(`[use_mcp_tool Result]\n\nError: MCP Hub not available`)
+				} else {
+					console.warn(`[Task] Invalid use_mcp_tool parameters - server: ${!!serverNameMatch?.[1]}, tool: ${!!toolNameMatch?.[1]}`)
+				}
+			}
+
+			// Execute access_mcp_resource
+			if (message.includes('<access_mcp_resource>')) {
+				console.log(`[Task] Executing access_mcp_resource`)
+				
+				// Check for interruption before each tool
+				if (this.abort || this.interrupted) {
+					console.log(`[Task] Tool execution interrupted during access_mcp_resource`)
+					return this.buildToolResults(toolResults, "[Tool Execution Interrupted] Task was interrupted during tool execution.")
+				}
+
+				const serverNameMatch = message.match(/<server_name>(.*?)<\/server_name>/s)
+				const uriMatch = message.match(/<uri>(.*?)<\/uri>/s)
+				
+				console.log(`[Task] MCP resource parsing - server: ${serverNameMatch?.[1]}, uri: ${uriMatch?.[1]}`)
+				
+				if (serverNameMatch?.[1] && uriMatch?.[1] && this.mcpHub) {
+					try {
+						const serverName = serverNameMatch[1].trim()
+						const uri = uriMatch[1].trim()
+						
+						console.log(`[Task] Accessing MCP resource: ${serverName}/${uri}`)
+						const result = await this.mcpHub.readResource(serverName, uri)
+						console.log(`[Task] MCP resource result received:`, result)
+						toolResults.push(`[access_mcp_resource Result]\n\nServer: ${serverName}\nURI: ${uri}\n\nResult:\n${JSON.stringify(result, null, 2)}`)
+					} catch (error) {
+						console.error(`[Task] Error accessing MCP resource:`, error)
+						toolResults.push(`[access_mcp_resource Result]\n\nError: ${error instanceof Error ? error.message : String(error)}`)
+					}
+				} else if (!this.mcpHub) {
+					console.warn(`[Task] MCP Hub not available for access_mcp_resource`)
+					toolResults.push(`[access_mcp_resource Result]\n\nError: MCP Hub not available`)
+				} else {
+					console.warn(`[Task] Invalid access_mcp_resource parameters - server: ${!!serverNameMatch?.[1]}, uri: ${!!uriMatch?.[1]}`)
 				}
 			}
 

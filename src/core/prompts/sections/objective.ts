@@ -18,6 +18,8 @@ export function getObjectiveSection(
 
 OBJECTIVE
 
+When the user asks you to "summarize the conversation" or refers to "our discussion" without specifying otherwise, they mean the current active conversation you're having with them right now. Only search external files or conversations when explicitly asked to analyze content from specific sources or files.
+
 You accomplish a given task iteratively, breaking it down into clear steps and working through them methodically.
 
 1. Analyze the user's task and set clear, achievable goals to accomplish it. Prioritize these goals in a logical order.

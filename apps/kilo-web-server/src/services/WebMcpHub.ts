@@ -73,15 +73,17 @@ class WebProviderAdapter {
 export class WebMcpHub {
 	public mcpHub: McpHub
 	private static instances = new Map<string, WebMcpHub>()
+	private providerAdapter: WebProviderAdapter // Keep strong reference to prevent GC
+	private vscodeAdapter: WebVSCodeAdapter // Keep strong reference to prevent GC
 
 	private constructor(workspacePath: string) {
-		const vscodeAdapter = new WebVSCodeAdapter(workspacePath)
-		const providerAdapter = new WebProviderAdapter(workspacePath)
+		this.vscodeAdapter = new WebVSCodeAdapter(workspacePath)
+		this.providerAdapter = new WebProviderAdapter(workspacePath)
 		const t = (key: string, params?: any) => key // Simple translation function
 
 		this.mcpHub = new McpHub(
-			providerAdapter as any,
-			vscodeAdapter as any,
+			this.providerAdapter as any,
+			this.vscodeAdapter as any,
 			t
 		)
 	}

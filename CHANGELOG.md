@@ -1,5 +1,33 @@
 # kilo-code
 
+## [v4.99.2]
+
+### Web Client Improvements
+
+- **Enhanced multiline textarea support**: Improved textarea with `rows={2}` default, auto-resize functionality, and contextual placeholder text that changes based on connection status
+- **Offline typing capability**: Users can now type and queue messages even when not connected to WebSocket, with proper visual feedback and message queueing
+- **Auto-scroll to bottom**: Messages automatically scroll to bottom with smooth animation when new messages arrive
+- **Recent message loading**: Last 20 messages from the persistent "main" task automatically load on page refresh for conversation continuity
+- **Fixed message formatting**: Resolved raw JSON display issues in resumed task messages with proper content validation
+
+### MCP Integration Fixes
+
+- **Restored MCP tool execution**: Fixed missing execution logic for `use_mcp_tool` and `access_mcp_resource` that was causing tools to display as raw text instead of executing
+- **Enhanced MCP logging**: Added comprehensive logging for tool detection, parameter parsing, execution results, and error handling for better debugging
+- **Improved tool pattern recognition**: Updated tool detection to properly recognize MCP tool patterns in assistant messages
+
+### Server Architecture Improvements
+
+- **Fixed task preloading**: Updated interrupt, halt, and resume handlers to automatically fetch the persistent "main" task from Firebase when not loaded in memory
+- **Eliminated task not found errors**: Resolved "Persistent task main not found or not active" errors by ensuring the server always has access to the persistent task
+- **Enhanced error handling**: Graceful handling of task operations when persistent task is undefined, with automatic preloading from Firebase
+
+### Type System Updates
+
+- **Extended TaskState interface**: Added "interrupted" and "halted" status types for better task state management
+- **Enhanced TaskEvents**: Added interrupt, halt, and resume event types for proper task control
+- **Updated web message types**: Added interrupt, halt, and resume message interfaces for WebSocket communication
+
 ## [v4.99.1]
 
 - [#2731](https://github.com/Kilo-Org/kilocode/pull/2731) [`36cf88f`](https://github.com/Kilo-Org/kilocode/commit/36cf88f868eee2a322b35b37032f98d199e0f91a) Thanks [@chrarnoldus](https://github.com/chrarnoldus)! - A recommendation to disable Editing Through Diffs or Fast Apply is now included in the error message when a model fails to use them properly

@@ -8,6 +8,7 @@ import { getSearchAndReplaceDescription } from './tools/search-and-replace.js'
 import { getChangeWorkingDirectoryDescription } from './tools/change-working-directory.js'
 import { getUseMcpToolDescription, getAccessMcpResourceDescription } from './tools/index'
 import { getMcpServersSection } from './sections/mcp-servers.js'
+import { getDiagnosticsSection } from './sections/diagnostics.js'
 import { McpHub } from '../services/mcp/McpHub.js'
 import { DiffStrategy } from '../shared/tools.js'
 
@@ -25,7 +26,20 @@ export async function generateWebSystemPrompt(
 	workspacePath: string,
 	mcpHub?: McpHub,
 	diffStrategy?: DiffStrategy,
-	enableMcpServerCreation?: boolean
+	enableMcpServerCreation?: boolean,
+	diagnostics?: {
+		tokenUsage?: { input: number; output: number; total: number },
+		messageCount?: number,
+		toolExecutionCount?: number,
+		sessionDuration?: number,
+		currentCost?: number,
+		taskId?: string,
+		modelId?: string,
+		errorCount?: number,
+		interruptionCount?: number,
+		lastToolUsed?: string,
+		contextUtilization?: number
+	}
 ): Promise<string> {
 	const roleDefinition = "You are Kilo Code, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices."
 	
@@ -91,6 +105,23 @@ ${getAttemptCompletionDescription(toolArgs)}`
 		? await getMcpServersSection(mcpHub, diffStrategy, enableMcpServerCreation)
 		: ''
 
+	// Generate diagnostics section if data is available
+	const diagnosticsSection = diagnostics ? getDiagnosticsSection(
+		diagnostics.tokenUsage,
+		diagnostics.messageCount,
+		diagnostics.toolExecutionCount,
+		diagnostics.sessionDuration,
+		diagnostics.currentCost,
+		diagnostics.taskId || 'main',
+		workspacePath,
+		diagnostics.modelId,
+		mcpHub?.getServers().length || 0,
+		diagnostics.errorCount,
+		diagnostics.interruptionCount,
+		diagnostics.lastToolUsed,
+		diagnostics.contextUtilization
+	) : ''
+
 	const capabilities = `====
 
 CAPABILITIES
@@ -107,12 +138,15 @@ CAPABILITIES
 
 OBJECTIVE
 
+When the user asks you to "summarize the conversation" or refers to "our discussion" without specifying otherwise, they mean the current active conversation you're having with them right now. Only search external files or conversations when explicitly asked to analyze content from specific sources or files.
+
 You accomplish a given task iteratively, breaking it down into clear steps and working through them methodically.
 
-1. Analyze the user's task and set clear, achievable goals to accomplish it.
-2. Work through these goals sequentially, utilizing available tools one at a time as necessary.
-3. Remember, you have extensive capabilities with access to a wide range of tools that can be used in powerful ways to accomplish each goal.
+1. Analyze the user's task and set clear, achievable goals to accomplish it. Prioritize these goals in a logical order.
+2. Work through these goals sequentially, utilizing available tools one at a time as necessary. Each goal should correspond to a distinct step in your problem-solving process. You will be informed on the work completed and what's remaining as you go.
+3. Remember, you have extensive capabilities with access to a wide range of tools that can be used in powerful and clever ways as necessary to accomplish each goal. Before calling a tool, do some analysis. First, analyze the file structure provided in environment_details to gain context and insights for proceeding effectively. Next, think about which of the provided tools is the most relevant tool to accomplish the user's task. Go through each of the required parameters of the relevant tool and determine if the user has directly provided or given enough information to infer a value. When deciding if the parameter can be inferred, carefully consider all the context to see if it supports a specific value. If all of the required parameters are present or can be reasonably inferred, proceed with the tool use. BUT, if one of the values for a required parameter is missing, DO NOT invoke the tool (not even with fillers for the missing params) and instead, ask the user to provide the missing parameters using the ask_followup_question tool. DO NOT ask for more information on optional parameters if it is not provided.
 4. Once you've completed the user's task, you must use the attempt_completion tool to present the result of the task to the user.
+5. The user may provide feedback, which you can use to make improvements and try again. But DO NOT continue in pointless back and forth conversations, i.e. don't end your responses with questions or offers for further assistance.
 
 Always be helpful, accurate, and efficient in your responses.`
 
@@ -122,7 +156,13 @@ Always be helpful, accurate, and efficient in your responses.`
 		sections.push(mcpServersSection)
 	}
 	
-	sections.push(capabilities, objective)
+	sections.push(capabilities)
+	
+	if (diagnosticsSection) {
+		sections.push(diagnosticsSection)
+	}
+	
+	sections.push(objective)
 
 	return sections.join('\n\n')
 }

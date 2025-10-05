@@ -33,12 +33,13 @@ interface ClientSession {
 	messages: ChatMessage[]
 	isActive: boolean
 	kilocodeToken?: string
-	currentTask?: any // Store the current Task instance
+	persistentTask?: any // Single persistent task that gets reused
 	messageCounter: number // Track message sequence
 	storageAdapter?: FirebaseTaskStorageAdapter // Storage adapter for conversation persistence
 	messageQueue: Array<{ message: any; resolve: Function; reject: Function }> // Message queue for ordering
 	isProcessingMessage: boolean // Flag to prevent concurrent message processing
 	pendingInterrupt?: { taskId: string; reason: string } // Track pending interrupts
+	persistentTaskId: string // Fixed task ID for the persistent task
 }
 
 export class SimpleWebServer {
@@ -112,6 +113,7 @@ export class SimpleWebServer {
 
 		this.wss.on("connection", (ws, req) => {
 			const clientId = this.generateClientId()
+			const persistentTaskId = "main" // Single hardcoded task ID
 			const session: ClientSession = {
 				id: clientId,
 				ws,
@@ -120,6 +122,7 @@ export class SimpleWebServer {
 				messageCounter: 0,
 				messageQueue: [],
 				isProcessingMessage: false,
+				persistentTaskId,
 			}
 
 			this.clients.set(clientId, session)
@@ -149,13 +152,13 @@ export class SimpleWebServer {
 
 			ws.on("close", () => {
 				console.log(`[SimpleWebServer] Client disconnected: ${clientId}`)
-				// Clean up any active tasks
+				// Clean up persistent task
 				const session = this.clients.get(clientId)
-				if (session?.currentTask) {
+				if (session?.persistentTask) {
 					try {
-						session.currentTask.abortTask()
+						session.persistentTask.abortTask()
 					} catch (error) {
-						console.error(`[SimpleWebServer] Error aborting task for disconnected client:`, error)
+						console.error(`[SimpleWebServer] Error aborting persistent task for disconnected client:`, error)
 					}
 				}
 				this.clients.delete(clientId)
@@ -163,13 +166,13 @@ export class SimpleWebServer {
 
 			ws.on("error", (error) => {
 				console.error(`[SimpleWebServer] WebSocket error for ${clientId}:`, error)
-				// Clean up any active tasks
+				// Clean up persistent task
 				const session = this.clients.get(clientId)
-				if (session?.currentTask) {
+				if (session?.persistentTask) {
 					try {
-						session.currentTask.abortTask()
+						session.persistentTask.abortTask()
 					} catch (error) {
-						console.error(`[SimpleWebServer] Error aborting task for errored client:`, error)
+						console.error(`[SimpleWebServer] Error aborting persistent task for errored client:`, error)
 					}
 				}
 				this.clients.delete(clientId)
@@ -295,21 +298,21 @@ export class SimpleWebServer {
 			}
 			session.messages.push(userMessage)
 
-			// Create a new task ID
-			const taskId = `task_${Date.now()}_${session.id}`
+			// Use persistent task ID
+			const taskId = "main"
 
 			// Send task created confirmation
 			this.sendToClient(session, {
 				type: "task_created",
 				payload: {
-					taskId,
+					taskId: "main",
 					mode: "code",
 					workspace: "/project",
 				},
 			})
 
-			// Create and store the task for continuous interaction
-			await this.createTaskForSession(session, text, taskId)
+			// Create or reuse persistent task
+			await this.ensurePersistentTask(session, text)
 		} catch (error) {
 			console.error("[SimpleWebServer] Error handling new task:", error)
 			this.sendToClient(session, {
@@ -336,34 +339,13 @@ export class SimpleWebServer {
 
 			// PERFORMANCE OPTIMIZATION: Make Firebase operations non-blocking
 			// Add user message to Firebase (async, don't block task creation)
-			this.firebaseService.addMessageToTask(taskId, userMessage).catch(firebaseError => {
-				console.error(`[SimpleWebServer] Failed to add user message to Firebase for task ${taskId}:`, firebaseError)
+			this.firebaseService.addMessageToTask("main", userMessage).catch(firebaseError => {
+				console.error(`[SimpleWebServer] Failed to add user message to Firebase for task main:`, firebaseError)
 				// Continue task execution - Firebase failures should not stop the agent
 			})
 
-			// Continue with existing task or create new one if task doesn't exist
-			if (session.currentTask && session.currentTask.taskId === taskId) {
-				// Continue existing task by sending user message to it
-				await this.continueExistingTask(session, text)
-			} else {
-				// Task doesn't exist, try to load from Firebase and resume
-				console.log(`[SimpleWebServer] Task ${taskId} not found in session, attempting to load from Firebase`)
-				try {
-					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
-					if (taskHistory) {
-						// Load the task and continue conversation
-						await this.resumeTaskFromFirebase(session, taskHistory, text)
-					} else {
-						// Task doesn't exist anywhere, create a new one
-						console.log(`[SimpleWebServer] Task ${taskId} not found in Firebase, creating new task`)
-						await this.createTaskForSession(session, text, taskId)
-					}
-				} catch (error) {
-					console.error(`[SimpleWebServer] Error loading task from Firebase:`, error)
-					// Fallback to creating new task
-					await this.createTaskForSession(session, text, taskId)
-				}
-			}
+			// Always use persistent task - create if doesn't exist
+			await this.ensurePersistentTask(session, text)
 		} catch (error) {
 			console.error("[SimpleWebServer] Error handling continue task:", error)
 			this.sendToClient(session, {
@@ -373,7 +355,19 @@ export class SimpleWebServer {
 		}
 	}
 
-	private async createTaskForSession(session: ClientSession, userText: string, taskId: string) {
+	private async ensurePersistentTask(session: ClientSession, userText: string) {
+		// If persistent task already exists, just continue the conversation
+		if (session.persistentTask) {
+			console.log(`[SimpleWebServer] Reusing persistent task ${"main"}`)
+			await this.continueExistingTask(session, userText)
+			return
+		}
+
+		// Create new persistent task
+		await this.createPersistentTask(session, userText)
+	}
+
+	private async createPersistentTask(session: ClientSession, userText: string) {
 		try {
 			// Initialize Kilo Code token if not already done
 			if (!session.kilocodeToken) {
@@ -395,12 +389,23 @@ export class SimpleWebServer {
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-3.5-sonnet:beta",
+				kilocodeModel: "anthropic/claude-sonnet-4:experimental",
 			}
 
-			// Create task dependencies for web environment with real adapters
-			// PRIORITY: Initial working directory should always be $HOME
-			const workspacePath = process.env.HOME || "/home/user"
+			// Load working directory from Firebase for persistent task or use default
+			let workspacePath = process.env.HOME || "/home/user"
+			try {
+				const savedWorkingDirectory = await this.firebaseService.loadWorkingDirectory("main")
+				if (savedWorkingDirectory) {
+					workspacePath = savedWorkingDirectory
+					console.log(`[SimpleWebServer] Loaded working directory from Firebase: ${workspacePath}`)
+				} else {
+					console.log(`[SimpleWebServer] No saved working directory for main task, using default: ${workspacePath}`)
+				}
+			} catch (error) {
+				console.error(`[SimpleWebServer] Error loading working directory, using default:`, error)
+			}
+
 			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
 			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
 			const storageAdapter = new FirebaseTaskStorageAdapter()
@@ -426,9 +431,9 @@ export class SimpleWebServer {
 				// MCP is optional, continue without it
 			}
 
-			// Create Task with orchestration and MCP support
+			// Create persistent Task with orchestration and MCP support
 			const task = new Task({
-				taskId,
+				taskId: "main",
 				apiConfiguration: providerConfig,
 				dependencies,
 				task: userText,
@@ -436,14 +441,14 @@ export class SimpleWebServer {
 				enableMcpServerCreation: true,
 			})
 
-			// Store task in session for continuous interaction
-			session.currentTask = task
+			// Store persistent task in session
+			session.persistentTask = task
 
 			// PERFORMANCE OPTIMIZATION: Make Firebase operations non-blocking
 			// Create Firebase task history entry (async, don't block task creation)
 			if (this.firebaseService) {
 				const taskHistory: TaskHistory = {
-					taskId,
+					taskId: "main",
 					clientId: session.id,
 					messages: Array.isArray(session.messages) ? [...session.messages] : [], // Ensure messages is always an array
 					createdAt: new Date(),
@@ -453,17 +458,17 @@ export class SimpleWebServer {
 
 				// Fire and forget - don't await to avoid blocking task creation
 				this.firebaseService.saveTaskHistory(taskHistory).then(() => {
-					console.log(`[SimpleWebServer] Task history saved to Firebase: ${taskId}`)
+					console.log(`[SimpleWebServer] Persistent task history saved to Firebase: ${"main"}`)
 				}).catch(firebaseError => {
-					console.error(`[SimpleWebServer] Failed to save task history to Firebase for task ${taskId}:`, firebaseError)
+					console.error(`[SimpleWebServer] Failed to save persistent task history to Firebase for task ${"main"}:`, firebaseError)
 					// Continue without Firebase - don't fail the task creation
 				})
 			}
 
 			// Set up task event listeners for streaming
-			this.setupTaskEventListeners(session, task, taskId)
+			this.setupTaskEventListeners(session, task, "main")
 
-			console.log(`[SimpleWebServer] Created Task ${taskId} for session ${session.id}`)
+			console.log(`[SimpleWebServer] Created persistent Task ${"main"} for session ${session.id}`)
 		} catch (error) {
 			console.error("[SimpleWebServer] Error creating task:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -599,6 +604,25 @@ export class SimpleWebServer {
 			})
 		})
 
+		// Handle task abort events
+		task.on("aborted", async (reason: string) => {
+			console.log(`[SimpleWebServer] Task aborted: ${reason}`)
+			
+			// Update task state to show abort and stop streaming
+			this.sendToClient(session, {
+				type: "task_state",
+				payload: {
+					taskId,
+					status: "idle",
+					isStreaming: false,
+					enableButtons: false,
+				},
+			})
+			
+			// Clear the aborted task from session so it gets recreated on next message
+			session.persistentTask = undefined
+		})
+
 		// Task Interruption & Control event listeners
 		task.on("interrupted", async (reason: string) => {
 			console.log(`[SimpleWebServer] Task interrupted: ${reason}`)
@@ -657,46 +681,52 @@ export class SimpleWebServer {
 
 	private async continueExistingTask(session: ClientSession, userText: string) {
 		try {
-			if (!session.currentTask) {
-				throw new Error("No current task to continue")
+			if (!session.persistentTask) {
+				throw new Error("No persistent task to continue")
 			}
 
-			const task = session.currentTask
-			const taskId = task.taskId
+			const task = session.persistentTask
+			const taskId = "main"
 
-			console.log(`[SimpleWebServer] Continuing existing task ${taskId} with conversation context`)
+			console.log(`[SimpleWebServer] Continuing persistent task ${taskId} with conversation context`)
 
 			// Use the new continueConversation method to maintain context
 			if (task.continueConversation) {
 				await task.continueConversation(userText)
-				console.log(`[SimpleWebServer] Continued conversation for task ${taskId}`)
+				console.log(`[SimpleWebServer] Continued conversation for persistent task ${taskId}`)
 			} else if (task.setMessageResponse) {
 				// Fallback to setMessageResponse for compatibility
 				task.setMessageResponse(userText)
-				console.log(`[SimpleWebServer] Sent user message to existing task ${taskId}`)
+				console.log(`[SimpleWebServer] Sent user message to persistent task ${taskId}`)
 			} else {
-				console.warn(`[SimpleWebServer] Task ${taskId} doesn't support conversation continuation, creating new task`)
-				await this.createTaskForSession(session, userText, taskId)
+				console.warn(`[SimpleWebServer] Persistent task ${taskId} doesn't support conversation continuation, recreating task`)
+				session.persistentTask = undefined
+				await this.ensurePersistentTask(session, userText)
 			}
 		} catch (error) {
-			console.error("[SimpleWebServer] Error continuing task:", error)
+			console.error("[SimpleWebServer] Error continuing persistent task:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
 			
-			// Clean up the failed task from session
-			if (session.currentTask) {
+			// Clean up the failed task from session and recreate
+			if (session.persistentTask) {
 				try {
-					session.currentTask.abortTask()
+					session.persistentTask.abortTask()
 				} catch (abortError) {
-					console.error("[SimpleWebServer] Error aborting failed task:", abortError)
+					console.error("[SimpleWebServer] Error aborting failed persistent task:", abortError)
 				}
-				session.currentTask = undefined
+				session.persistentTask = undefined
 			}
 			
-			// Send error to client
-			this.sendToClient(session, {
-				type: "error",
-				payload: { message: `Task continuation error: ${errorMessage}` },
-			})
+			// Recreate persistent task
+			try {
+				await this.ensurePersistentTask(session, userText)
+			} catch (recreateError) {
+				// Send error to client if recreation also fails
+				this.sendToClient(session, {
+					type: "error",
+					payload: { message: `Task continuation error: ${errorMessage}` },
+				})
+			}
 		}
 	}
 
@@ -716,12 +746,23 @@ export class SimpleWebServer {
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-3.5-sonnet:beta",
+				kilocodeModel: "anthropic/claude-sonnet-4:experimental",
 			}
 
-			// Create task dependencies with storage adapter
-			// PRIORITY: Initial working directory should always be $HOME
-			const workspacePath = process.env.HOME || "/home/user"
+			// Load working directory from Firebase or use default
+			let workspacePath = process.env.HOME || "/home/user"
+			try {
+				const savedWorkingDirectory = await this.firebaseService.loadWorkingDirectory(taskHistory.taskId)
+				if (savedWorkingDirectory) {
+					workspacePath = savedWorkingDirectory
+					console.log(`[SimpleWebServer] Loaded working directory from Firebase: ${workspacePath}`)
+				} else {
+					console.log(`[SimpleWebServer] No saved working directory, using default: ${workspacePath}`)
+				}
+			} catch (error) {
+				console.error(`[SimpleWebServer] Error loading working directory, using default:`, error)
+			}
+
 			const fileSystemAdapter = new NodeFileSystemAdapter(workspacePath)
 			const terminalAdapter = new NodeTerminalAdapter(workspacePath)
 			const storageAdapter = new FirebaseTaskStorageAdapter()
@@ -755,7 +796,7 @@ export class SimpleWebServer {
 			})
 
 			// Store task and storage adapter in session
-			session.currentTask = task
+			session.persistentTask = task
 			session.storageAdapter = storageAdapter
 
 			// Load existing messages into session (ensure messages is an array)
@@ -785,7 +826,7 @@ export class SimpleWebServer {
 			// This method is now deprecated in favor of createTaskForSession
 			// Keeping for backward compatibility
 			const taskId = `task_${Date.now()}`
-			await this.createTaskForSession(session, userText, taskId)
+			await this.ensurePersistentTask(session, userText)
 		} catch (error) {
 			console.error("[SimpleWebServer] Error with agent response:", error)
 			const errorMessage = error instanceof Error ? error.message : String(error)
@@ -805,7 +846,7 @@ export class SimpleWebServer {
 			const providerConfig: ProviderSettings = {
 				apiProvider: "kilocode",
 				kilocodeToken: session.kilocodeToken!,
-				kilocodeModel: "anthropic/claude-3.5-sonnet:beta",
+				kilocodeModel: "anthropic/claude-sonnet-4:experimental",
 			}
 
 			// Create API handler using shared buildApiHandler
@@ -894,7 +935,7 @@ export class SimpleWebServer {
 
 			// Prepare request payload
 			const payload = {
-				model: "anthropic/claude-3.5-sonnet:beta", // Default Kilo Code model
+				model: "anthropic/claude-sonnet-4:experimental", // Default Kilo Code model
 				messages: [{ role: "system", content: systemPrompt }, ...apiMessages],
 				stream: true,
 				max_tokens: 4096,
@@ -1099,10 +1140,10 @@ export class SimpleWebServer {
 			// Load the task messages into current session
 			session.messages = [...taskHistory.messages]
 			
-			// Set current task ID for continuation
+			// Set persistent task ID for continuation
 			if (mode === "continue") {
 				// Resume the existing task - client will handle setting currentTaskId
-				session.currentTask = { taskId } // Simplified task reference
+				session.persistentTask = { taskId: "main" } // Use persistent task ID
 			}
 
 			// Send task resumed response
@@ -1174,8 +1215,23 @@ export class SimpleWebServer {
 			
 			console.log(`[SimpleWebServer] Interrupting task ${taskId}: ${reason}`)
 			
-			if (session.currentTask && session.currentTask.taskId === taskId) {
-				await session.currentTask.interruptTask(reason)
+			// If persistent task is not loaded, fetch it from Firebase and preload it
+			if (!session.persistentTask && "main" === taskId) {
+				console.log(`[SimpleWebServer] Persistent task not loaded, fetching from Firebase: ${taskId}`)
+				try {
+					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
+					if (taskHistory) {
+						// Preload the task from Firebase
+						await this.resumeTaskFromFirebase(session, taskHistory, "")
+						console.log(`[SimpleWebServer] Successfully preloaded task ${taskId} from Firebase`)
+					}
+				} catch (preloadError) {
+					console.error(`[SimpleWebServer] Failed to preload task ${taskId}:`, preloadError)
+				}
+			}
+			
+			if (session.persistentTask && "main" === taskId) {
+				await session.persistentTask.interruptTask(reason)
 				
 				this.sendToClient(session, {
 					type: "task_interrupted_response",
@@ -1187,7 +1243,17 @@ export class SimpleWebServer {
 					},
 				})
 			} else {
-				throw new Error(`Task ${taskId} not found or not active`)
+				// If we still can't find the task after attempting to preload
+				console.log(`[SimpleWebServer] Task ${taskId} not found even after preload attempt`)
+				this.sendToClient(session, {
+					type: "task_interrupted_response",
+					payload: {
+						success: true, // Report success since there's nothing to interrupt
+						taskId,
+						reason: "Task not available for interruption",
+						requestId: payload.requestId,
+					},
+				})
 			}
 		} catch (error) {
 			console.error("[SimpleWebServer] Error interrupting task:", error)
@@ -1208,8 +1274,22 @@ export class SimpleWebServer {
 			
 			console.log(`[SimpleWebServer] Halting task ${taskId}: ${reason}`)
 			
-			if (session.currentTask && session.currentTask.taskId === taskId) {
-				await session.currentTask.haltTask(reason)
+			// If persistent task is not loaded, fetch it from Firebase and preload it
+			if (!session.persistentTask && "main" === taskId) {
+				console.log(`[SimpleWebServer] Persistent task not loaded, fetching from Firebase: ${taskId}`)
+				try {
+					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
+					if (taskHistory) {
+						await this.resumeTaskFromFirebase(session, taskHistory, "")
+						console.log(`[SimpleWebServer] Successfully preloaded task ${taskId} from Firebase`)
+					}
+				} catch (preloadError) {
+					console.error(`[SimpleWebServer] Failed to preload task ${taskId}:`, preloadError)
+				}
+			}
+			
+			if (session.persistentTask && "main" === taskId) {
+				await session.persistentTask.haltTask(reason)
 				
 				// Update Firebase task status
 				this.firebaseService.updateTaskStatus(taskId, 'halted' as any).catch(firebaseError => {
@@ -1226,7 +1306,16 @@ export class SimpleWebServer {
 					},
 				})
 			} else {
-				throw new Error(`Task ${taskId} not found or not active`)
+				console.log(`[SimpleWebServer] Task ${taskId} not found even after preload attempt`)
+				this.sendToClient(session, {
+					type: "task_halted_response",
+					payload: {
+						success: true,
+						taskId,
+						reason: "Task not available for halting",
+						requestId: payload.requestId,
+					},
+				})
 			}
 		} catch (error) {
 			console.error("[SimpleWebServer] Error halting task:", error)
@@ -1247,8 +1336,22 @@ export class SimpleWebServer {
 			
 			console.log(`[SimpleWebServer] Resuming interrupted task ${taskId}`)
 			
-			if (session.currentTask && session.currentTask.taskId === taskId) {
-				await session.currentTask.resumeTask()
+			// If persistent task is not loaded, fetch it from Firebase and preload it
+			if (!session.persistentTask && "main" === taskId) {
+				console.log(`[SimpleWebServer] Persistent task not loaded, fetching from Firebase: ${taskId}`)
+				try {
+					const taskHistory = await this.firebaseService.getTaskHistory(taskId)
+					if (taskHistory) {
+						await this.resumeTaskFromFirebase(session, taskHistory, "")
+						console.log(`[SimpleWebServer] Successfully preloaded task ${taskId} from Firebase`)
+					}
+				} catch (preloadError) {
+					console.error(`[SimpleWebServer] Failed to preload task ${taskId}:`, preloadError)
+				}
+			}
+			
+			if (session.persistentTask && "main" === taskId) {
+				await session.persistentTask.resumeTask()
 				
 				// Update Firebase task status
 				this.firebaseService.updateTaskStatus(taskId, 'active').catch(firebaseError => {
@@ -1264,7 +1367,16 @@ export class SimpleWebServer {
 					},
 				})
 			} else {
-				throw new Error(`Task ${taskId} not found`)
+				console.log(`[SimpleWebServer] Task ${taskId} not found even after preload attempt`)
+				this.sendToClient(session, {
+					type: "task_resumed_response",
+					payload: {
+						success: true,
+						taskId,
+						reason: "Task not available for resuming",
+						requestId: payload.requestId,
+					},
+				})
 			}
 		} catch (error) {
 			console.error("[SimpleWebServer] Error resuming interrupted task:", error)

@@ -66,7 +66,6 @@ export default function App() {
 		isStreaming: false,
 		enableButtons: false,
 	})
-	const [currentTaskId, setCurrentTaskId] = useState<string | null>(null)
 	const [clientId, setClientId] = useState<string>("")
 	const [messageCounter, setMessageCounter] = useState(0)
 	const [activeStreamIds, setActiveStreamIds] = useState<Set<string>>(new Set())
@@ -76,6 +75,7 @@ export default function App() {
 
 	const wsRef = useRef<WebSocket | null>(null)
 	const inputRef = useRef<HTMLInputElement | null>(null)
+	const messagesEndRef = useRef<HTMLDivElement | null>(null)
 	const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 	const reconnectAttempts = useRef(0)
 	const maxReconnectAttempts = 5
@@ -145,24 +145,31 @@ export default function App() {
 		}
 	}, [connectWebSocket])
 
+	// Auto-scroll to bottom when new messages arrive
+	useEffect(() => {
+		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+	}, [messages])
+
 	const handleServerMessage = (message: ServerMessage) => {
 		console.log("[App] Received message:", message.type)
 
+		const LOAD_MESSAGES_DELAY_MS = 50;
 		if (isConnectionStatusMessage(message)) {
 			setClientId(message.payload.clientId)
 			// Automatically load task history when connected
 			setTimeout(() => {
 				loadTaskHistory()
-			}, 500) // Small delay to ensure connection is stable
+				// Also request the most recent messages for the main task
+				loadRecentMessages()
+			}, LOAD_MESSAGES_DELAY_MS) // Small delay to ensure connection is stable
 			return
 		}
 
 		if (isTaskCreatedMessage(message)) {
-			// Handle task creation - update task state with new task info
-			setCurrentTaskId(message.payload.taskId)
+			// Handle task creation - always use "main" task ID
 			setTaskState((prev) => ({
 				...prev,
-				taskId: message.payload.taskId,
+				taskId: "main",
 				status: "running",
 				isStreaming: true,
 			}))
@@ -174,7 +181,7 @@ export default function App() {
 
 			setMessages((prev) => {
 				// Use server-provided streamId if available, otherwise generate one
-				const effectiveStreamId = streamId || `${currentTaskId || 'unknown'}_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
+				const effectiveStreamId = streamId || `main_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
 				const effectiveMessageId = messageId || `msg_${ts}_${Math.random().toString(36).substr(2, 9)}`
 				
 				// Find existing message with same stream ID for streaming updates
@@ -221,7 +228,7 @@ export default function App() {
 				}))
 				
 				// Remove from active stream IDs when complete
-				const effectiveStreamId = streamId || `${currentTaskId || 'unknown'}_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
+				const effectiveStreamId = streamId || `main_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
 				setActiveStreamIds(prev => {
 					const newSet = new Set(prev)
 					newSet.delete(effectiveStreamId)
@@ -229,7 +236,7 @@ export default function App() {
 				})
 			} else {
 				// Add to active stream IDs when streaming
-				const effectiveStreamId = streamId || `${currentTaskId || 'unknown'}_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
+				const effectiveStreamId = streamId || `main_${messageType}_${say || ask || 'default'}_${Math.floor(ts / 1000)}`
 				setActiveStreamIds(prev => new Set(prev).add(effectiveStreamId))
 			}
 			return
@@ -237,16 +244,13 @@ export default function App() {
 
 		if (isTaskStateMessage(message)) {
 			setTaskState({
-				taskId: message.payload.taskId,
+				taskId: "main",
 				status: message.payload.status,
 				isStreaming: message.payload.isStreaming,
 				enableButtons: message.payload.enableButtons,
 				primaryButtonText: message.payload.primaryButtonText,
 				secondaryButtonText: message.payload.secondaryButtonText,
 			})
-			
-			// Update current task ID when task state changes
-			setCurrentTaskId(message.payload.taskId)
 			return
 		}
 
@@ -276,14 +280,48 @@ export default function App() {
 		// Handle task resumed
 		if ((message as any).type === "task_resumed") {
 			const payload = (message as any).payload
-			// Load the resumed task messages
-			setMessages(payload.messages || [])
-			setCurrentTaskId(payload.taskId)
+			// Load the resumed task messages with proper content validation
+			const resumedMessages = (payload.messages || []).map((msg: any, index: number) => {
+				// Ensure content is a string, not an object
+				let content = msg.content
+				if (typeof content === 'object') {
+					// If content is an object, try to extract meaningful text
+					if (content.text) {
+						content = content.text
+					} else if (content.type && content.text) {
+						content = content.text
+					} else {
+						// Fallback: stringify the object but make it readable
+						content = JSON.stringify(content, null, 2)
+					}
+				}
+				
+				return {
+					id: msg.id || `resumed_${Date.now()}_${index}`,
+					content: content || '',
+					type: msg.type || 'assistant',
+					timestamp: msg.timestamp || Date.now(),
+					partial: false,
+					ask: msg.ask,
+					say: msg.say,
+					messageIndex: index,
+					streamId: msg.streamId
+				} as ChatMessage
+			})
+			
+			// Only keep the most recent 20 messages
+			const recentMessages = resumedMessages.slice(-20)
+			setMessages(recentMessages)
 			setTaskState((prev) => ({
 				...prev,
-				taskId: payload.taskId,
+				taskId: "main",
 				status: payload.status === "completed" ? "idle" : "idle",
 			}))
+			
+			// Scroll to bottom after loading messages
+			setTimeout(() => {
+				messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+			}, 100)
 			return
 		}
 
@@ -307,10 +345,11 @@ export default function App() {
 	}
 
 	const sendMessage = () => {
-		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !input.trim()) {
+		if (!input.trim()) {
 			return
 		}
 
+		// Always add user message to UI, even when not connected
 		const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 		const currentMessageIndex = messageCounter
 		
@@ -325,15 +364,33 @@ export default function App() {
 		setMessages((prev) => [...prev, userMessage])
 		setMessageCounter(prev => prev + 1)
 
+		// If not connected, show offline message but still display user input
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+			const offlineMessage: ChatMessage = {
+				id: Date.now().toString() + "_offline",
+				content: "⚠️ Not connected to server. Message queued and will be sent when connection is restored.",
+				type: "error",
+				timestamp: Date.now(),
+			}
+			setMessages((prev) => [...prev, offlineMessage])
+			setInput("")
+			
+			// Keep input focused after sending message
+			setTimeout(() => {
+				inputRef.current?.focus()
+			}, 100)
+			return
+		}
+
 		// ENHANCED INTERRUPT COORDINATION: Better handling of streaming interruption
-		if (taskState.isStreaming && currentTaskId) {
+		if (taskState.isStreaming) {
 			console.log("[App] Auto-interrupting current stream to send new message")
 			
 			// Send interrupt message
 			const interruptMessage = {
 				type: "interrupt_task",
 				payload: {
-					taskId: currentTaskId,
+					taskId: "main",
 					reason: "Auto-interrupted by new user message"
 				},
 				requestId: clientId,
@@ -351,14 +408,12 @@ export default function App() {
 			}))
 		}
 
-		// Determine message type based on whether we have an active task
-		const messageType = currentTaskId ? "continue_task" : "new_task"
-		
+		// Always use continue_task with hardcoded "main" task ID
 		const message = {
-			type: messageType,
+			type: "continue_task",
 			payload: {
 				text: input,
-				taskId: currentTaskId, // Include taskId for continuing tasks
+				taskId: "main", // Always use main task ID
 				messageIndex: currentMessageIndex // Include message sequence
 			},
 			requestId: clientId,
@@ -366,7 +421,7 @@ export default function App() {
 		}
 
 		// Small delay to ensure interrupt is processed first if needed
-		const sendDelay = (taskState.isStreaming && currentTaskId) ? 150 : 0
+		const sendDelay = taskState.isStreaming ? 150 : 0
 		
 		setTimeout(() => {
 			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -414,6 +469,24 @@ export default function App() {
 		wsRef.current.send(JSON.stringify(message))
 	}
 
+	const loadRecentMessages = () => {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+			return
+		}
+
+		const message = {
+			type: "resume_task",
+			payload: {
+				taskId: "main",
+				mode: "view_only"
+			},
+			requestId: clientId,
+			timestamp: Date.now(),
+		}
+
+		wsRef.current.send(JSON.stringify(message))
+	}
+
 	const resumeTask = (taskId: string) => {
 		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
 			return
@@ -449,14 +522,14 @@ export default function App() {
 
 	// Task Interruption & Control functions
 	const interruptTask = (reason: string = "User interrupted task") => {
-		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !currentTaskId) {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
 			return
 		}
 
 		const message = {
 			type: "interrupt_task",
 			payload: {
-				taskId: currentTaskId,
+				taskId: "main",
 				reason
 			},
 			requestId: clientId,
@@ -467,14 +540,14 @@ export default function App() {
 	}
 
 	const haltTask = (reason: string = "Task halted by user") => {
-		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !currentTaskId) {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
 			return
 		}
 
 		const message = {
 			type: "halt_task",
 			payload: {
-				taskId: currentTaskId,
+				taskId: "main",
 				reason
 			},
 			requestId: clientId,
@@ -485,13 +558,13 @@ export default function App() {
 	}
 
 	const resumeInterruptedTask = () => {
-		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !currentTaskId) {
+		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
 			return
 		}
 
 		const message = {
 			type: "resume_interrupted_task",
-			payload: { taskId: currentTaskId },
+			payload: { taskId: "main" },
 			requestId: clientId,
 			timestamp: Date.now(),
 		}
@@ -617,51 +690,48 @@ export default function App() {
 						</div>
 					</div>
 
-					{(taskState.taskId || currentTaskId) && (
-						<div className="mt-2">
-							{/* Task Info - Mobile: Stack vertically, Desktop: Side by side */}
-							<div className="flex flex-col md:flex-row md:justify-between md:items-center gap-2">
-								<div className="text-sm text-gray-300">
-									<div className="truncate">Task: {(taskState.taskId || currentTaskId)?.slice(-12) || 'Unknown'}</div>
-									<div className="flex flex-wrap gap-2 text-xs">
-										<span>Status: {taskState.status}</span>
-										{taskState.isStreaming && <span className="text-blue-400">• Streaming...</span>}
-										{currentTaskId && <span className="text-green-400">• Context Maintained</span>}
-									</div>
-								</div>
-								
-								{/* Task Control Buttons - Mobile: Full width, Desktop: Compact */}
-								<div className="flex gap-1 md:gap-2 w-full md:w-auto">
-									{/* Show interrupt/halt buttons when there's an active task */}
-									{currentTaskId && taskState.status !== "interrupted" && taskState.status !== "halted" && taskState.status !== "error" && (
-										<>
-											<button
-												onClick={() => interruptTask("User requested interruption")}
-												className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-yellow-600 text-white text-xs rounded hover:bg-yellow-700"
-												title="Interrupt task (can be resumed)">
-												Interrupt
-											</button>
-											<button
-												onClick={() => haltTask("User halted task")}
-												className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700"
-												title="Halt task (more aggressive stop)">
-												Halt
-											</button>
-										</>
-									)}
-									
-									{(taskState.status === "interrupted" || taskState.status === "halted") && (
-										<button
-											onClick={resumeInterruptedTask}
-											className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
-											title="Resume interrupted/halted task">
-											Resume
-										</button>
-									)}
+					{/* Task Info */}
+					<div className="mt-2">
+						<div className="flex flex-col md:flex-row md:justify-between md:items-center gap-2">
+							<div className="text-sm text-gray-300">
+								<div className="truncate">Task: main</div>
+								<div className="flex flex-wrap gap-2 text-xs">
+									<span>Status: {taskState.status}</span>
+									{taskState.isStreaming && <span className="text-blue-400">• Streaming...</span>}
+									<span className="text-green-400">• Context Maintained</span>
 								</div>
 							</div>
+							
+							{/* Task Control Buttons */}
+							<div className="flex gap-1 md:gap-2 w-full md:w-auto">
+								{taskState.status !== "interrupted" && taskState.status !== "halted" && taskState.status !== "error" && (
+									<>
+										<button
+											onClick={() => interruptTask("User requested interruption")}
+											className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-yellow-600 text-white text-xs rounded hover:bg-yellow-700"
+											title="Interrupt task (can be resumed)">
+											Interrupt
+										</button>
+										<button
+											onClick={() => haltTask("User halted task")}
+											className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700"
+											title="Halt task (more aggressive stop)">
+											Halt
+										</button>
+									</>
+								)}
+								
+								{(taskState.status === "interrupted" || taskState.status === "halted") && (
+									<button
+										onClick={resumeInterruptedTask}
+										className="flex-1 md:flex-none px-2 md:px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+										title="Resume interrupted/halted task">
+										Resume
+									</button>
+								)}
+							</div>
 						</div>
-					)}
+					</div>
 				</div>
 
 			{/* Messages */}
@@ -731,6 +801,28 @@ export default function App() {
 						</div>
 					</div>
 				))}
+
+				{/* Thinking bubble when task is streaming */}
+				{taskState.isStreaming && taskState.status === "running" && (
+					<div className="w-full">
+						<div className="bg-gray-800 text-gray-100 border border-gray-700 w-full rounded-none md:rounded-lg px-2 md:px-4 py-3">
+							<div className="text-xs opacity-70 mb-2">
+								Assistant
+							</div>
+							<div className="text-sm flex items-center gap-2">
+								<div className="flex gap-1">
+									<div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
+									<div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+									<div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+								</div>
+								<span className="text-gray-400">thinking...</span>
+							</div>
+						</div>
+					</div>
+				)}
+				
+				{/* Invisible element to scroll to */}
+				<div ref={messagesEndRef} />
 			</div>
 
 			{/* Tool Approval Buttons */}
@@ -760,21 +852,40 @@ export default function App() {
 			{/* Input */}
 			<div className="border-t border-gray-700 bg-gray-800 p-3 md:p-4">
 				<div className="flex gap-2">
-					<input
-						ref={inputRef}
-						type="text"
+					<textarea
+						ref={inputRef as any}
 						value={input}
 						onChange={(e) => setInput(e.target.value)}
-						onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-						placeholder={taskState.isStreaming ? "Send to interrupt and queue new message..." : "Send a message..."}
-						className="flex-1 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-						disabled={!isConnected}
+						onKeyDown={(e) => {
+							if (e.key === "Enter" && !e.shiftKey) {
+								e.preventDefault()
+								sendMessage()
+							}
+						}}
+						placeholder={
+							!isConnected
+								? "Type your message (will be queued until connected)..."
+								: taskState.isStreaming
+									? "Send to interrupt and queue new message..."
+									: "Type your message... (Shift+Enter for new line)"
+						}
+						className="flex-1 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none min-h-[3rem] max-h-32"
+						rows={2}
+						style={{
+							height: 'auto',
+							minHeight: '3rem'
+						}}
+						onInput={(e) => {
+							const target = e.target as HTMLTextAreaElement
+							target.style.height = 'auto'
+							target.style.height = Math.min(target.scrollHeight, 128) + 'px'
+						}}
 					/>
 					<button
 						onClick={sendMessage}
-						disabled={!isConnected || !input.trim()}
+						disabled={!input.trim()}
 						className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-						Send
+						{isConnected ? "Send" : "Queue"}
 					</button>
 				</div>
 
@@ -783,7 +894,7 @@ export default function App() {
 						Status: {getConnectionStatusText()}
 						{taskState.status !== "idle" && ` • Task: ${taskState.status}`}
 					</span>
-					<span>Press Enter to send, Shift+Enter for new line</span>
+					<span>{isConnected ? "Press Enter to send, Shift+Enter for new line" : "Not connected - messages will queue"}</span>
 				</div>
 			</div>
 			</div>
