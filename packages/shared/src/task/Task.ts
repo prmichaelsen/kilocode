@@ -262,12 +262,13 @@ export class Task extends EventEmitter<TaskEvents> {
 
 	// Method to continue an existing conversation with a new user message
 	public async continueConversation(text: string, images?: string[]): Promise<void> {
-		if (this.abort) {
-			console.warn(`[Task] Attempted to continue conversation on aborted task ${this.taskId}`)
-			return // Return gracefully instead of throwing
-		}
-
 		console.log(`[Task] Queueing message for task ${this.taskId}`)
+
+		// Reset abort flag when user sends new message - this allows task to resume
+		if (this.abort) {
+			console.log(`[Task] Resetting abort flag to resume task ${this.taskId}`)
+			this.abort = false
+		}
 
 		// Queue the message instead of processing it directly
 		// This allows the message to interrupt autonomous execution loops
